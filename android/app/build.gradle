@@ -24,9 +24,11 @@ android {
         applicationId "online.rublicx.app"
         minSdk 24
         targetSdk 34
-        // versionCode is monotonic; CI sets it from GITHUB_RUN_NUMBER or commit count.
-        versionCode (System.getenv("APK_VERSION_CODE") ?: "1") as Integer
-        versionName System.getenv("APK_VERSION_NAME") ?: "0.1.0"
+        // versionCode is monotonic; CI sets it from GITHUB_RUN_NUMBER. Default to 1 for local dev.
+        def envCode = System.getenv("APK_VERSION_CODE")
+        def envName = System.getenv("APK_VERSION_NAME")
+        versionCode = (envCode != null && envCode.trim()) ? Integer.parseInt(envCode.trim()) : 1
+        versionName = (envName != null && envName.trim()) ? envName.trim() : "0.1.0"
         vectorDrawables.useSupportLibrary true
 
         buildConfigField "String", "RELEASE_API",

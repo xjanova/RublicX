@@ -33,6 +33,11 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Setup Gradle 8.9 (AGP 8.5 compatible)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
       - name: Compute version
         id: ver
         run: |
@@ -60,10 +65,6 @@ jobs:
           echo "have_keystore=true" >> "$GITHUB_OUTPUT"
           echo "keystore_path=$HOME/.keystore/rublicx.keystore" >> "$GITHUB_OUTPUT"
 
-      - name: Generate Gradle wrapper
-        working-directory: android
-        run: gradle wrapper --gradle-version 8.9
-
       - name: Build signed release APK
         working-directory: android
         env:
@@ -73,9 +74,7 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           APK_VERSION_CODE: ${{ steps.ver.outputs.version_code }}
           APK_VERSION_NAME: ${{ steps.ver.outputs.version_name }}
-        run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon :app:assembleRelease
+        run: gradle --no-daemon :app:assembleRelease --stacktrace
 
       - name: Locate APK
         id: locate
