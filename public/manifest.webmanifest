@@ -1,0 +1,34 @@
+{
+  "name": "RublicX — Master the Cube",
+  "short_name": "RublicX",
+  "description": "Learn to solve Rubik's cubes (2x2 to 5x5) with a 3D animated solver, camera scanner, and CFOP/OLL/PLL tutorials.",
+  "start_url": "./",
+  "scope": "./",
+  "id": "rublicx",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#06070b",
+  "theme_color": "#0A0B10",
+  "lang": "en",
+  "categories": ["education", "games", "utilities"],
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Scan Cube",
+      "url": "./?tab=scan",
+      "description": "Open the camera scanner immediately"
+    },
+    {
+      "name": "Timer",
+      "url": "./?tab=timer",
+      "description": "Open the speed timer"
+    }
+  ]
+}
