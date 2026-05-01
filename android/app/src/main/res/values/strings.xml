@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">RublicX</string>
+    <string name="update_available_title">เวอร์ชันใหม่พร้อมแล้ว</string>
+    <string name="update_available_title_en">Update available</string>
+    <string name="update_button">อัปเดตเลย</string>
+    <string name="update_button_en">Update now</string>
+    <string name="update_later">ภายหลัง</string>
+    <string name="update_later_en">Later</string>
+    <string name="updating">กำลังดาวน์โหลด %1$d%%</string>
+    <string name="updating_en">Downloading %1$d%%</string>
+    <string name="install_failed">ติดตั้งไม่สำเร็จ ลองอีกครั้ง</string>
+    <string name="install_failed_en">Install failed. Try again.</string>
+</resources>

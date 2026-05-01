@@ -8,3 +8,21 @@ dist
 .cache
 extracted
 *.zip
+
+# Android
+android/.gradle/
+android/local.properties
+android/keystore.properties
+android/.idea/
+android/build/
+android/app/build/
+android/captures/
+android/app/release/
+android/app/debug/
+*.iml
+*.keystore
+*.jks
+*.apk
+*.aab
+.gradle/
+local.properties

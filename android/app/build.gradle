@@ -1,0 +1,95 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+import java.util.Properties
+
+// Read signing config from environment OR keystore.properties (local).
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+def envOrProp = { envName, propName, defVal = null ->
+    System.getenv(envName) ?: keystoreProperties[propName] ?: defVal
+}
+
+android {
+    namespace 'online.rublicx.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "online.rublicx.app"
+        minSdk 24
+        targetSdk 34
+        // versionCode is monotonic; CI sets it from GITHUB_RUN_NUMBER or commit count.
+        versionCode (System.getenv("APK_VERSION_CODE") ?: "1") as Integer
+        versionName System.getenv("APK_VERSION_NAME") ?: "0.1.0"
+        vectorDrawables.useSupportLibrary true
+
+        buildConfigField "String", "RELEASE_API",
+            "\"https://api.github.com/repos/xjanova/RublicX/releases/latest\""
+        buildConfigField "String", "WEB_URL",
+            "\"https://xjanova.github.io/RublicX/\""
+        buildConfigField "String", "VERSION_JSON_URL",
+            "\"https://xjanova.github.io/RublicX/version.json\""
+    }
+
+    signingConfigs {
+        release {
+            def storeFilePath = envOrProp("ANDROID_KEYSTORE_PATH", "storeFile", "")
+            if (storeFilePath) {
+                storeFile file(storeFilePath)
+                storePassword envOrProp("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+                keyAlias envOrProp("ANDROID_KEY_ALIAS", "keyAlias")
+                keyPassword envOrProp("ANDROID_KEY_PASSWORD", "keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // Use the release signing config when keystore is configured; otherwise fall back to
+            // debug signing so local builds still produce an APK (won't install over a real release).
+            def storeFilePath = envOrProp("ANDROID_KEYSTORE_PATH", "storeFile", "")
+            signingConfig storeFilePath ? signingConfigs.release : signingConfigs.debug
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            applicationIdSuffix ".debug"
+            versionNameSuffix "-debug"
+        }
+    }
+
+    buildFeatures {
+        buildConfig true
+        viewBinding true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    packaging {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.activity:activity-ktx:1.9.2'
+    implementation 'androidx.webkit:webkit:1.11.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+}
