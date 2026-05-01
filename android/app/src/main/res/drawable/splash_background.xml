@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Solid background only. Showing a centered vector via <bitmap> doesn't work
+     because ic_logo is a vector drawable, not a raster bitmap — that was the
+     crash on launch. Vectors must be referenced via android:drawable on the item. -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/bg" />
-    <item android:gravity="center">
-        <bitmap android:src="@drawable/ic_logo" />
-    </item>
+    <item
+        android:width="160dp"
+        android:height="160dp"
+        android:gravity="center"
+        android:drawable="@drawable/ic_logo" />
 </layer-list>

@@ -48,26 +48,30 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Switch from splash theme to normal theme.
-        setTheme(R.style.Theme_RublicX)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        try {
+            binding = ActivityMainBinding.inflate(layoutInflater)
+            setContentView(binding.root)
 
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
-        WindowInsetsControllerCompat(window, binding.root).isAppearanceLightStatusBars = false
+            WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.statusBarColor = Color.TRANSPARENT
+            window.navigationBarColor = Color.TRANSPARENT
+            WindowInsetsControllerCompat(window, binding.root).isAppearanceLightStatusBars = false
 
-        webView = binding.webview
-        configureWebView(webView)
-        webView.loadUrl(BuildConfig.WEB_URL)
+            webView = binding.webview
+            configureWebView(webView)
+            webView.loadUrl(BuildConfig.WEB_URL)
 
-        binding.updateBanner.visibility = View.GONE
-        binding.updateButton.setOnClickListener { triggerUpdate() }
-        binding.updateLater.setOnClickListener { hideBanner() }
+            binding.updateBanner.visibility = View.GONE
+            binding.updateButton.setOnClickListener { triggerUpdate() }
+            binding.updateLater.setOnClickListener { hideBanner() }
 
-        // Check for updates on launch (single shot). The web app's SW handles in-session updates.
-        checkForApkUpdate()
+            // Check for updates on launch (single shot). The web app's SW handles in-session updates.
+            checkForApkUpdate()
+        } catch (t: Throwable) {
+            // Surface fatal errors via Logcat (filter: tag=RublicX) instead of silent crashes.
+            android.util.Log.e("RublicX", "Fatal during onCreate", t)
+            throw t
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
