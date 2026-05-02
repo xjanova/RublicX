@@ -4,8 +4,8 @@ import { useI18n, FACE_LABELS, SCAN_INSTRUCTIONS } from '../i18n.jsx';
 import CubeNet from '../components/CubeNet.jsx';
 import { CameraIcon, ChevronLeftIcon, InfoIcon, SparkIcon, CheckIcon } from '../components/Icons.jsx';
 import {
-  sampleGrid, kmeansFaces, rgbConfidence, frameDrift, gridConfidence,
-  hexToRgb, rgbToHex, nearestStandardColor,
+  sampleGrid, kmeansFaces, rgbConfidence,
+  hexToRgb, rgbToHex, nearestStandardColor, captureReadiness,
 } from '../lib/colorDetect.js';
 import { HEX_BY_FACE } from '../lib/cube.js';
 
@@ -19,14 +19,12 @@ const SIZE_OPTIONS = [
   { n: 5, label: '5×5', subKey: 'professorSub' },
 ];
 
-// Auto-capture thresholds. Tuned empirically:
-//   - Per-cell LAB distance to standard cube color ≤ 12 → "confident"
-//   - Frame-to-frame drift ≤ 10 → "stable"
-//   - Both must hold for STABILITY_FRAMES consecutive samples → fire capture
-const STABILITY_FRAMES = 4;
-const CONFIDENCE_THRESHOLD = 0.62;
-const DRIFT_THRESHOLD = 12;
-const SAMPLE_INTERVAL_MS = 220;
+// Auto-capture: requires the captureReadiness() check (confidence + saturation + stability)
+// to hold for STABILITY_FRAMES consecutive samples before firing. This is a real "ready"
+// signal, not just per-cell color matching — flat walls and motion both fail it.
+const STABILITY_FRAMES = 6;
+const SAMPLE_INTERVAL_MS = 200;
+const UI_AUTOHIDE_MS = 2800;
 
 export default function ScanScreen({ onScanComplete, onBack }) {
   const { t, lang } = useI18n();
@@ -39,11 +37,17 @@ export default function ScanScreen({ onScanComplete, onBack }) {
   const [cameraStarting, setCameraStarting] = React.useState(false);
 
   // Live preview + auto-capture state
-  const [livePreview, setLivePreview] = React.useState(null);   // current N×N RGB grid for the scan target
-  const [confidence, setConfidence] = React.useState(0);        // 0..1
+  const [livePreview, setLivePreview] = React.useState(null);   // current N×N RGB grid
+  const [readyScore, setReadyScore] = React.useState(0);        // captureReadiness().score 0..1
+  const [readyReasons, setReadyReasons] = React.useState([]);
   const [stableCount, setStableCount] = React.useState(0);
-  const [autoCountdown, setAutoCountdown] = React.useState(0);  // STABILITY_FRAMES..0; 0 = not active
+  const [autoCountdown, setAutoCountdown] = React.useState(0);
   const [allSamples, setAllSamples] = React.useState([]);
+
+  // Auto-hide UI: bottom panel + instruction bubble fade after a few seconds of no interaction,
+  // tap anywhere brings them back. Scan target stays visible always.
+  const [uiVisible, setUiVisible] = React.useState(true);
+  const uiTimerRef = React.useRef(null);
 
   const videoRef = React.useRef(null);
   const streamRef = React.useRef(null);
@@ -92,12 +96,24 @@ export default function ScanScreen({ onScanComplete, onBack }) {
   React.useEffect(() => {
     return () => {
       if (sampleTimerRef.current) clearInterval(sampleTimerRef.current);
+      if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
     };
   }, []);
+
+  // Reset auto-hide timer whenever the user taps the screen.
+  const resetUITimer = React.useCallback(() => {
+    setUiVisible(true);
+    if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
+    if (cameraReady) {
+      uiTimerRef.current = setTimeout(() => setUiVisible(false), UI_AUTOHIDE_MS);
+    }
+  }, [cameraReady]);
+
+  React.useEffect(() => { resetUITimer(); }, [cameraReady, faceIdx, resetUITimer]);
 
   // Reset face / scanned state when cube size changes
   React.useEffect(() => {
@@ -153,18 +169,15 @@ export default function ScanScreen({ onScanComplete, onBack }) {
       const grid = sampleNow();
       if (!grid) return;
       setLivePreview(grid);
-      const conf = gridConfidence(grid);
-      setConfidence(conf);
-      const drift = frameDrift(lastGridRef.current, grid);
+      const r = captureReadiness(grid, lastGridRef.current);
       lastGridRef.current = grid;
-      const isStable = drift < DRIFT_THRESHOLD;
-      const isConfident = conf > CONFIDENCE_THRESHOLD;
-      if (isStable && isConfident) {
+      setReadyScore(r.score);
+      setReadyReasons(r.reasons);
+      if (r.ready) {
         setStableCount((s) => {
           const next = Math.min(STABILITY_FRAMES, s + 1);
           setAutoCountdown(STABILITY_FRAMES - next);
           if (next >= STABILITY_FRAMES) {
-            // Auto-fire capture
             captureLockRef.current = true;
             setTimeout(() => doCapture(grid), 80);
           }
@@ -222,6 +235,12 @@ export default function ScanScreen({ onScanComplete, onBack }) {
       position: 'relative', width: '100%', height: '100%',
       background: '#000', overflow: 'hidden',
     }}>
+      {/* Tap-anywhere catcher reveals the UI when it has been auto-hidden. Sits behind everything
+           except the camera feed; doesn't block interactive elements. */}
+      <div onClick={resetUITimer} style={{
+        position: 'absolute', inset: 0, zIndex: 1,
+      }} />
+
       {/* Camera feed (always rendered so we can call play() on it before showing UI). */}
       <video ref={videoRef} autoPlay playsInline muted style={{
         position: 'absolute', inset: 0, width: '100%', height: '100%',
@@ -304,6 +323,10 @@ export default function ScanScreen({ onScanComplete, onBack }) {
         padding: '0 16px',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         zIndex: 10,
+        opacity: uiVisible ? 1 : 0,
+        transform: uiVisible ? 'translateY(0)' : 'translateY(-12px)',
+        transition: 'opacity 0.28s ease, transform 0.28s ease',
+        pointerEvents: uiVisible ? 'auto' : 'none',
       }}>
         <button onClick={onBack} aria-label="Back" style={{
           width: 40, height: 40, borderRadius: 20,
@@ -342,6 +365,10 @@ export default function ScanScreen({ onScanComplete, onBack }) {
         position: 'absolute', top: 108, left: 0, right: 0,
         display: 'flex', justifyContent: 'center', gap: 6,
         padding: '0 16px', zIndex: 9,
+        opacity: uiVisible ? 1 : 0,
+        transform: uiVisible ? 'translateY(0)' : 'translateY(-12px)',
+        transition: 'opacity 0.28s ease, transform 0.28s ease',
+        pointerEvents: uiVisible ? 'auto' : 'none',
       }}>
         {SIZE_OPTIONS.map(s => {
           const active = cubeSize === s.n;
@@ -384,8 +411,11 @@ export default function ScanScreen({ onScanComplete, onBack }) {
       {/* Instruction bubble */}
       <div style={{
         position: 'absolute', top: 178, left: '50%',
-        transform: 'translateX(-50%)',
+        transform: `translateX(-50%) translateY(${uiVisible ? '0' : '-12px'})`,
         zIndex: 8,
+        opacity: uiVisible ? 1 : 0,
+        transition: 'opacity 0.28s ease, transform 0.28s ease',
+        pointerEvents: uiVisible ? 'auto' : 'none',
       }}>
         <div style={{
           padding: '10px 18px', borderRadius: 24,
@@ -404,18 +434,29 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           </div>
           <div style={{
             padding: '2px 6px', borderRadius: 6,
-            background: confidence > CONFIDENCE_THRESHOLD ? 'rgba(0,224,183,0.18)' : 'rgba(255,77,109,0.18)',
-            color: confidence > CONFIDENCE_THRESHOLD ? T.accent2 : '#FF4D6D',
+            background: readyScore > 0.78 ? 'rgba(0,224,183,0.18)' : 'rgba(255,77,109,0.18)',
+            color: readyScore > 0.78 ? T.accent2 : '#FF4D6D',
             fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
-          }}>{(confidence * 100).toFixed(0)}%</div>
+          }}>{(readyScore * 100).toFixed(0)}%</div>
         </div>
+        {readyReasons.length > 0 && (
+          <div style={{
+            marginTop: 6, padding: '4px 10px', borderRadius: 12,
+            background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(12px)',
+            color: '#FFB627', fontSize: 10, fontWeight: 600,
+            textAlign: 'center', letterSpacing: 0.2,
+          }}>{readyReasons.join(' · ')}</div>
+        )}
       </div>
 
       {/* AI badges */}
       <div style={{
-        position: 'absolute', top: 220, left: '50%',
-        transform: 'translateX(-50%)',
+        position: 'absolute', top: 240, left: '50%',
+        transform: `translateX(-50%) translateY(${uiVisible ? '0' : '-8px'})`,
         zIndex: 8, display: 'flex', gap: 6,
+        opacity: uiVisible ? 1 : 0,
+        transition: 'opacity 0.28s ease, transform 0.28s ease',
+        pointerEvents: uiVisible ? 'auto' : 'none',
       }}>
         <div style={{
           padding: '4px 10px', borderRadius: 999,
@@ -445,6 +486,10 @@ export default function ScanScreen({ onScanComplete, onBack }) {
         border: '0.5px solid rgba(255,255,255,0.1)',
         padding: '16px 16px 14px',
         zIndex: 10,
+        opacity: uiVisible ? 1 : 0,
+        transform: uiVisible ? 'translateY(0)' : 'translateY(140%)',
+        transition: 'opacity 0.32s ease, transform 0.32s ease',
+        pointerEvents: uiVisible ? 'auto' : 'none',
       }}>
         <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 12 }}>
           <CubeNet n={cubeSize} scale={cubeSize <= 3 ? 0.85 : 0.6} scannedFaces={scannedFaces} currentFace={currentFace} />
@@ -491,10 +536,27 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           textAlign: 'center', marginTop: 8, letterSpacing: 0.3,
         }}>
           {lang === 'th'
-            ? 'ถือลูกบาศก์ในกรอบ — โปรแกรมจะถ่ายเองเมื่อสีนิ่ง'
-            : 'Hold cube inside frame — auto-captures when colors are stable'}
+            ? 'ถือลูกในกรอบ ระบบถ่ายเองเมื่อพร้อม · แตะหน้าจอเพื่อแสดง/ซ่อนเมนู'
+            : 'Hold cube in frame, auto-captures when ready · tap to toggle UI'}
         </div>
       </div>
+
+      {/* Floating "show UI" hint when hidden — small pill at bottom center */}
+      {!uiVisible && cameraReady && (
+        <div style={{
+          position: 'absolute', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+          padding: '6px 14px', borderRadius: 999,
+          background: 'rgba(0,0,0,0.55)',
+          backdropFilter: 'blur(12px)',
+          border: '0.5px solid rgba(255,255,255,0.12)',
+          color: 'rgba(255,255,255,0.6)',
+          fontSize: 10, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase',
+          zIndex: 11, pointerEvents: 'none',
+          animation: 'fadeUp 0.36s ease both',
+        }}>
+          {lang === 'th' ? 'แตะเพื่อแสดงเมนู' : 'Tap to show menu'}
+        </div>
+      )}
     </div>
   );
 }

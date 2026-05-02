@@ -135,6 +135,60 @@ export function gridConfidence(grid) {
   return minC;
 }
 
+// Saturation in [0..1]. We reject grids whose cells are mostly gray (camera pointed at the wall,
+// not a cube): a face of stickers should have decently saturated colors. Compute as
+// (max - min) / max, the standard HSV saturation, and take the average across cells.
+export function gridSaturation(grid) {
+  let total = 0, n = 0;
+  for (const row of grid) for (const [r, g, b] of row) {
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    if (max === 0) continue;
+    total += (max - min) / max;
+    n++;
+  }
+  return n ? total / n : 0;
+}
+
+// Number of distinct standard colors detected. A real cube face shows 1-3 different colors —
+// flat-color frames (eg gray wall) will collapse to <= 1, allowing us to reject them. For the
+// whole 6-face scan we also use this to cross-check after k-means clustering.
+export function distinctColors(grid) {
+  const seen = new Set();
+  for (const row of grid) for (const rgb of row) {
+    seen.add(nearestStandardColorIdx(rgb));
+  }
+  return seen.size;
+}
+
+function nearestStandardColorIdx(rgb) {
+  const lab = rgbToLab(rgb);
+  let best = 0, bestD = Infinity;
+  for (let k = 0; k < 6; k++) {
+    const stdLab = rgbToLab(hexToRgb(HEX_BY_FACE[k]));
+    const d = labDist(lab, stdLab);
+    if (d < bestD) { bestD = d; best = k; }
+  }
+  return best;
+}
+
+// Composite "ready to capture" check: bundles the heuristics so the UI can render a single
+// progress signal. Returns:
+//   { ready: boolean, score: 0..1, reasons: string[] (failed checks) }
+export function captureReadiness(grid, prevGrid) {
+  const reasons = [];
+  const conf = gridConfidence(grid);
+  if (conf < 0.78) reasons.push(`confidence ${(conf * 100).toFixed(0)}%`);
+  const sat = gridSaturation(grid);
+  if (sat < 0.28) reasons.push(`flat ${(sat * 100).toFixed(0)}%`);
+  const drift = frameDrift(prevGrid, grid);
+  if (drift > 9) reasons.push(`moving Δ${drift.toFixed(0)}`);
+  // Score combines confidence, saturation (clamped), and stability into a single 0..1 reading
+  const stabilityScore = Math.max(0, Math.min(1, 1 - drift / 24));
+  const satScore = Math.max(0, Math.min(1, sat * 2));
+  const score = conf * 0.55 + satScore * 0.2 + stabilityScore * 0.25;
+  return { ready: reasons.length === 0, score, reasons };
+}
+
 // k-means in LAB space, init = standard cube colors. samples is a flat array of [r,g,b].
 export function kmeansFaces(samples, maxIter = 12) {
   const labs = samples.map(rgbToLab);
