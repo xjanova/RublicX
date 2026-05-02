@@ -3,10 +3,10 @@ import { T } from '../theme.js';
 import { useI18n } from '../i18n.jsx';
 import AnimatedCube from '../components/AnimatedCube.jsx';
 import { PlayIcon, PauseIcon, PrevIcon, NextIcon, SparkIcon } from '../components/Icons.jsx';
-import { solveCube } from '../lib/solver.js';
+import { solveCube, buildMethodWalkthrough } from '../lib/solver.js';
 import { solvedCube, applyMoves, cloneCube, fromFaceGrids, parseMoves } from '../lib/cube.js';
 
-const METHOD_DEMO = parseMoves("F R U R' U' F' R U R' U R U2 R' U R U' R' U' R U' R' U' R U R' U' R' F R2 U' R' U' R U R' F'");
+const METHOD_WALKTHROUGH = buildMethodWalkthrough();
 
 export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }) {
   const { t, lang } = useI18n();
@@ -28,19 +28,34 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
   // (CFOP triggers + Sune + T-perm) regardless of input — useful for teaching alongside the
   // user's actual cube. Fastest mode invokes the on-device solver and surfaces an unsolved
   // state cleanly when the IDA* depth budget is exceeded.
-  const { sequence, methodName, unsolved } = React.useMemo(() => {
+  const { sequence, methodName, unsolved, phases } = React.useMemo(() => {
     if (mode === 'method') {
-      return { sequence: METHOD_DEMO, methodName: 'CFOP', unsolved: false };
+      return {
+        sequence: METHOD_WALKTHROUGH.moves,
+        phases: METHOD_WALKTHROUGH.phases,
+        methodName: 'CFOP',
+        unsolved: false,
+      };
     }
     const result = solveCube(cloneCube(initialCube), {
       mode,
       history: scrambleHistory && !scanResult ? scrambleHistory : null,
     });
     if (result.moves.length === 0) {
-      return { sequence: METHOD_DEMO, methodName: result.method, unsolved: true };
+      return {
+        sequence: METHOD_WALKTHROUGH.moves,
+        phases: METHOD_WALKTHROUGH.phases,
+        methodName: result.method,
+        unsolved: true,
+      };
     }
-    return { sequence: result.moves, methodName: result.method, unsolved: false };
+    return { sequence: result.moves, phases: null, methodName: result.method, unsolved: false };
   }, [initialCube, mode, scrambleHistory, scanResult]);
+
+  const currentPhase = React.useMemo(() => {
+    if (!phases) return null;
+    return phases.find((p) => moveIdx >= p.startIdx && moveIdx <= p.endIdx) || phases[0];
+  }, [phases, moveIdx]);
 
   return (
     <div className="scrollable" style={{
@@ -118,6 +133,34 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
           ))}
         </div>
       </div>
+
+      {currentPhase && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: `linear-gradient(135deg, rgba(124,92,255,0.18) 0%, rgba(255,106,61,0.10) 100%)`,
+            border: '1px solid rgba(124,92,255,0.35)',
+            borderRadius: 14, padding: '10px 14px',
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          }}>
+            <div>
+              <div style={{ color: T.muted, fontSize: 9, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase' }}>
+                {lang === 'th' ? 'ขั้นตอน' : 'Phase'} {phases.indexOf(currentPhase) + 1}/{phases.length}
+              </div>
+              <div style={{ color: T.text, fontSize: 14, fontWeight: 700, marginTop: 2 }}>
+                {currentPhase.label}
+              </div>
+            </div>
+            <div style={{
+              padding: '4px 10px', borderRadius: 999,
+              background: 'rgba(255,255,255,0.06)',
+              color: T.muted, fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+              fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+            }}>
+              {moveIdx - currentPhase.startIdx + 1}/{currentPhase.endIdx - currentPhase.startIdx + 1}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 3D cube viewer */}
       <div style={{

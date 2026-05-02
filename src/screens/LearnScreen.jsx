@@ -25,7 +25,26 @@ export default function LearnScreen() {
     { id: 'oll', title: t.ollTitle, sub: 'OLL · 57 algs', dur: '24 ' + t.minutes, prog: 0.3, alg: TUTORIAL_ALGS.ollSune },
     { id: 'pll', title: t.pllTitle, sub: 'PLL · 21 algs', dur: '18 ' + t.minutes, prog: 0, alg: TUTORIAL_ALGS.pllT },
     { id: 'finger', title: t.fingerTricksTitle, sub: t.fingerTricks, dur: '8 ' + t.minutes, prog: 0, secret: true, alg: TUTORIAL_ALGS.ollAntiSune },
-    { id: 'champ', title: t.championAlgs, sub: t.secret, dur: '32 ' + t.minutes, prog: 0, secret: true, alg: TUTORIAL_ALGS.pllH },
+    { id: 'champ', title: t.championAlgs, sub: t.secret, dur: '32 ' + t.minutes, prog: 0, secret: true, alg: TUTORIAL_ALGS.pllY },
+  ];
+
+  // Algorithm gallery — grouped by phase. Each card opens to show the animated cube + alg
+  // notation. Useful as a reference once the user has a feel for the basics.
+  const galleries = [
+    {
+      title: lang === 'th' ? 'F2L · เคสที่พบบ่อย' : 'F2L · common cases',
+      algs: [TUTORIAL_ALGS.f2l1, TUTORIAL_ALGS.f2l2, TUTORIAL_ALGS.f2l3, TUTORIAL_ALGS.f2l4, TUTORIAL_ALGS.f2l5],
+    },
+    {
+      title: lang === 'th' ? 'OLL · สูตรหลัก' : 'OLL · core algs',
+      algs: [TUTORIAL_ALGS.ollEdges, TUTORIAL_ALGS.ollSune, TUTORIAL_ALGS.ollAntiSune,
+             TUTORIAL_ALGS.ollT, TUTORIAL_ALGS.ollH, TUTORIAL_ALGS.ollPi],
+    },
+    {
+      title: lang === 'th' ? 'PLL · 6 สูตรแรก' : 'PLL · first 6',
+      algs: [TUTORIAL_ALGS.pllT, TUTORIAL_ALGS.pllU, TUTORIAL_ALGS.pllUprime,
+             TUTORIAL_ALGS.pllJ, TUTORIAL_ALGS.pllY, TUTORIAL_ALGS.pllA],
+    },
   ];
 
   return (
@@ -142,6 +161,45 @@ export default function LearnScreen() {
           </div>
         ))}
       </div>
+
+      {/* Algorithm galleries — F2L / OLL / PLL collections */}
+      {galleries.map((g) => (
+        <div key={g.title} style={{ padding: '24px 16px 0' }}>
+          <div style={{
+            color: T.text, fontSize: 14, fontWeight: 700, marginBottom: 8, paddingLeft: 4,
+            display: 'flex', alignItems: 'center', gap: 8,
+          }}>
+            <SparkIcon color={T.accent} size={14} />
+            {g.title}
+            <span style={{ color: T.dim, fontSize: 11, fontWeight: 600 }}>· {g.algs.length}</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {g.algs.map((alg) => (
+              <div
+                key={alg.notation}
+                onClick={() => setOpenAlg(openAlg === alg.notation ? null : alg.notation)}
+                style={{
+                  background: T.card, border: `1px solid ${T.border}`,
+                  borderRadius: 14, padding: '10px 12px',
+                  cursor: 'pointer',
+                }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ color: T.text, fontSize: 12, fontWeight: 700 }}>{alg.title}</div>
+                    <div style={{
+                      color: T.muted, fontSize: 10, marginTop: 1,
+                      fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+                      whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    }}>{alg.notation}</div>
+                  </div>
+                  <ArrowRight color={T.dim} size={12} />
+                </div>
+                {openAlg === alg.notation && <AlgPreview alg={alg} />}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

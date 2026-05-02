@@ -107,7 +107,7 @@ export default function ReviewScreen({ scanResult, onConfirm, onRescan, onBack }
         />
       </div>
 
-      {/* Color counts */}
+      {/* Color counts with explicit short/extra deltas */}
       <div style={{ padding: '16px 16px 0' }}>
         <div style={{ color: T.dim, fontSize: 10, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 8, paddingLeft: 4 }}>
           {t.counts} · {t.expected} {expected}
@@ -115,34 +115,87 @@ export default function ReviewScreen({ scanResult, onConfirm, onRescan, onBack }
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
           {HEX_BY_FACE.map((hex) => {
             const c = counts[hex] || 0;
-            const ok = c === expected;
+            const delta = c - expected;
+            const ok = delta === 0;
+            const tag = delta > 0
+              ? (lang === 'th' ? `+${delta} เกิน` : `+${delta} extra`)
+              : delta < 0
+                ? (lang === 'th' ? `${delta} ขาด` : `${delta} short`)
+                : (lang === 'th' ? 'พอดี' : 'ok');
             return (
               <div key={hex} style={{
-                display: 'flex', alignItems: 'center', gap: 6,
-                padding: '6px 10px', borderRadius: 12,
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+                padding: '8px 10px', borderRadius: 14,
                 background: ok ? 'rgba(0,224,183,0.10)' : 'rgba(255,77,109,0.12)',
-                border: `1px solid ${ok ? 'rgba(0,224,183,0.4)' : 'rgba(255,77,109,0.4)'}`,
+                border: `1px solid ${ok ? 'rgba(0,224,183,0.4)' : 'rgba(255,77,109,0.5)'}`,
+                minWidth: 64,
               }}>
                 <div style={{
-                  width: 14, height: 14, borderRadius: 4,
+                  width: 18, height: 18, borderRadius: 4,
                   background: hex,
                   boxShadow: 'inset 0 0 0 0.5px rgba(0,0,0,0.3)',
                 }} />
                 <span style={{
                   color: ok ? T.accent2 : '#FF4D6D',
-                  fontSize: 12, fontWeight: 700,
+                  fontSize: 13, fontWeight: 700,
                   fontFamily: 'JetBrains Mono, ui-monospace, monospace',
-                }}>{c}</span>
+                }}>{c}/{expected}</span>
+                <span style={{
+                  color: ok ? T.accent2 : '#FF4D6D',
+                  fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+                }}>{tag}</span>
               </div>
             );
           })}
         </div>
         {!isValid && (
           <div style={{
-            marginTop: 10, color: T.muted, fontSize: 11,
-            textAlign: 'center', lineHeight: 1.4,
+            marginTop: 14,
+            background: 'rgba(255,77,109,0.10)',
+            border: '1px solid rgba(255,77,109,0.35)',
+            borderRadius: 14,
+            padding: '12px 14px',
           }}>
-            {t.invalidCounts.replace('{count}', expected)}
+            <div style={{
+              color: '#FF4D6D', fontSize: 11, fontWeight: 700,
+              letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 6,
+            }}>
+              {lang === 'th' ? '⚠ ตรวจสอบสีต่อไปนี้' : '⚠ Recheck these colors'}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {HEX_BY_FACE.map((hex) => {
+                const delta = (counts[hex] || 0) - expected;
+                if (delta === 0) return null;
+                const colorName = colorLabel(hex, lang);
+                const msg = delta > 0
+                  ? (lang === 'th'
+                      ? `${colorName} เกินมา ${delta} ช่อง — แตะช่องที่ไม่ใช่ ${colorName} แล้วเปลี่ยนสี`
+                      : `${colorName} has ${delta} extra cell${delta > 1 ? 's' : ''} — tap a non-${colorName} cell that's wrong and recolor`)
+                  : (lang === 'th'
+                      ? `${colorName} ขาดอีก ${-delta} ช่อง — มีช่องสีอื่นที่ควรเป็น ${colorName}`
+                      : `${colorName} needs ${-delta} more — some cell currently a different color should be ${colorName}`);
+                return (
+                  <div key={hex} style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    color: T.text, fontSize: 12, lineHeight: 1.4,
+                  }}>
+                    <div style={{
+                      width: 12, height: 12, borderRadius: 3, flexShrink: 0,
+                      background: hex,
+                      boxShadow: 'inset 0 0 0 0.5px rgba(0,0,0,0.3)',
+                    }} />
+                    <span>{msg}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{
+              marginTop: 8, color: T.muted, fontSize: 10, lineHeight: 1.4,
+            }}>
+              {lang === 'th'
+                ? 'ผลรวมของทุกสีต้องเท่ากับ ' + (expected * 6) + ' (' + expected + ' ช่อง × 6 หน้า) จึงจะแก้ได้จริง'
+                : 'All colors must total ' + (expected * 6) + ' (' + expected + ' cells × 6 faces) for the cube to be solvable'}
+            </div>
           </div>
         )}
       </div>
@@ -308,4 +361,13 @@ function countColors(faces) {
     }
   }
   return counts;
+}
+
+// Friendly per-color names so the recheck panel reads naturally in either language.
+function colorLabel(hex, lang) {
+  const map = {
+    th: { '#FFFFFF': 'ขาว', '#B71234': 'แดง', '#009B48': 'เขียว', '#FFD500': 'เหลือง', '#FF5800': 'ส้ม', '#0046AD': 'น้ำเงิน' },
+    en: { '#FFFFFF': 'White', '#B71234': 'Red', '#009B48': 'Green', '#FFD500': 'Yellow', '#FF5800': 'Orange', '#0046AD': 'Blue' },
+  };
+  return (map[lang] || map.en)[hex] || hex;
 }
