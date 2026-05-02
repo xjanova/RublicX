@@ -54,18 +54,21 @@ object UpdateChecker {
     }
 
     /**
-     * Encodes a tag like "v0.4.12+abc1234" or "v0.4.12-build.42" into a stable integer.
-     * We use major*1_000_000 + minor*10_000 + patch*100 + (run_number % 100). If a build number
-     * suffix is present, prefer it for the lowest two digits — that's how CI disambiguates patches.
+     * Parse the build number from a release tag and return the SAME formula CI uses for the
+     * APK's BuildConfig.VERSION_CODE: 100 + run_number. The CI workflow sets
+     *
+     *     CODE=$((${{ github.run_number }} + 100))
+     *
+     * and tags the release "v<pkg>-build.<run_number>". So tag "v0.1.0-build.6" → 106, which is
+     * exactly what the installed APK from run 6 has. That's how we reliably tell "you're up to
+     * date" vs "an update is available". A previous version of this parser used a semver-encoded
+     * scheme that always returned a number larger than the installed code → banner looped.
      */
     fun parseVersionCodeFromTag(tag: String): Int {
         val cleaned = tag.removePrefix("v").trim()
-        // Match major.minor.patch
-        val semverMatch = Regex("^(\\d+)\\.(\\d+)\\.(\\d+)").find(cleaned) ?: return 0
-        val (maj, min, pat) = semverMatch.destructured
-        // Match optional -build.<n> or +<n> suffix
+        // -build.<n> is the canonical CI pattern. We also accept +<n> as a fallback.
         val buildSuffix = Regex("[-+](?:build\\.)?(\\d+)").find(cleaned)
         val build = buildSuffix?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-        return maj.toInt() * 1_000_000 + min.toInt() * 10_000 + pat.toInt() * 100 + (build % 100)
+        return 100 + build
     }
 }

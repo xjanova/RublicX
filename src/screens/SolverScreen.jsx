@@ -6,8 +6,10 @@ import { PlayIcon, PauseIcon, PrevIcon, NextIcon, SparkIcon } from '../component
 import { solveCube } from '../lib/solver.js';
 import { solvedCube, applyMoves, cloneCube, fromFaceGrids, parseMoves } from '../lib/cube.js';
 
-export default function SolverScreen({ scanResult, scrambleHistory }) {
-  const { t } = useI18n();
+const METHOD_DEMO = parseMoves("F R U R' U' F' R U R' U R U2 R' U R U' R' U' R U' R' U' R U R' U' R' F R2 U' R' U' R U R' F'");
+
+export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }) {
+  const { t, lang } = useI18n();
   const [playing, setPlaying] = React.useState(true);
   const [speed, setSpeed] = React.useState(1);
   const [mode, setMode] = React.useState('fastest');
@@ -16,23 +18,28 @@ export default function SolverScreen({ scanResult, scrambleHistory }) {
   // Resolve the input cube state.
   const initialCube = React.useMemo(() => {
     if (scanResult) return fromFaceGrids(scanResult.faces, scanResult.size);
-    // Demo cube: solved cube with a fixed scramble applied
     const demoScramble = parseMoves("R U R' U' F R F' L U' L' D F2");
     const c = solvedCube(3);
     applyMoves(c, demoScramble);
     return c;
   }, [scanResult]);
 
-  // Compute solution.
-  const { sequence, methodName } = React.useMemo(() => {
+  // Compute solution. Method-based mode always shows the pre-canned educational sequence
+  // (CFOP triggers + Sune + T-perm) regardless of input — useful for teaching alongside the
+  // user's actual cube. Fastest mode invokes the on-device solver and surfaces an unsolved
+  // state cleanly when the IDA* depth budget is exceeded.
+  const { sequence, methodName, unsolved } = React.useMemo(() => {
+    if (mode === 'method') {
+      return { sequence: METHOD_DEMO, methodName: 'CFOP', unsolved: false };
+    }
     const result = solveCube(cloneCube(initialCube), {
       mode,
       history: scrambleHistory && !scanResult ? scrambleHistory : null,
     });
-    return {
-      sequence: result.moves.length ? result.moves : parseMoves("R U R' U' F R F' L U' L'"),
-      methodName: result.method,
-    };
+    if (result.moves.length === 0) {
+      return { sequence: METHOD_DEMO, methodName: result.method, unsolved: true };
+    }
+    return { sequence: result.moves, methodName: result.method, unsolved: false };
   }, [initialCube, mode, scrambleHistory, scanResult]);
 
   return (
@@ -53,19 +60,38 @@ export default function SolverScreen({ scanResult, scrambleHistory }) {
             {t.solution}
           </div>
           <div style={{ color: T.text, fontSize: 26, fontWeight: 700, marginTop: 2 }}>
-            {t.solved2}
+            {unsolved ? (lang === 'th' ? 'ตัวอย่าง CFOP' : 'CFOP demo') : t.solved2}
           </div>
         </div>
         <div style={{
           padding: '6px 12px', borderRadius: 14,
-          background: 'rgba(0,224,183,0.14)',
-          color: T.accent2, fontSize: 11, fontWeight: 700, letterSpacing: 0.3,
+          background: unsolved ? 'rgba(255,182,39,0.16)' : 'rgba(0,224,183,0.14)',
+          color: unsolved ? T.warn : T.accent2, fontSize: 11, fontWeight: 700, letterSpacing: 0.3,
           display: 'flex', alignItems: 'center', gap: 5,
         }}>
-          <SparkIcon size={12} color={T.accent2} />
-          {t.optimal}
+          <SparkIcon size={12} color={unsolved ? T.warn : T.accent2} />
+          {unsolved ? (lang === 'th' ? 'ลึกเกิน' : 'too deep') : t.optimal}
         </div>
       </div>
+
+      {unsolved && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(255,182,39,0.10)',
+            border: '1px solid rgba(255,182,39,0.35)',
+            borderRadius: 14,
+            padding: '12px 14px',
+            display: 'flex', alignItems: 'center', gap: 12,
+          }}>
+            <div style={{ fontSize: 22 }}>⚠️</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? 'ตัวแก้บนเครื่องหา solution ภายใน 4.5 วิ ไม่เจอ — สแกนใหม่ด้วยการสับลูกที่น้อยลง หรือเรียนสูตรจากแท็บ Method'
+                : 'On-device solver couldn\'t find a solution within 4.5s. Try rescanning with a less scrambled cube, or learn the algorithms in the Method tab.'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mode segmented */}
       <div style={{ padding: '14px 16px 0', position: 'relative' }}>

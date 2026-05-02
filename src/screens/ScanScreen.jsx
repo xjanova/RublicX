@@ -25,34 +25,57 @@ export default function ScanScreen({ onScanComplete, onBack }) {
   const [confidence, setConfidence] = React.useState(0.94);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [cameraError, setCameraError] = React.useState(null);
+  const [cameraStarting, setCameraStarting] = React.useState(false);
   const [allSamples, setAllSamples] = React.useState([]); // for k-means at end
   const videoRef = React.useRef(null);
   const streamRef = React.useRef(null);
 
-  React.useEffect(() => {
-    let cancelled = false;
-    async function start() {
+  // We START the camera lazily on user tap (required by iOS Safari and some Android WebViews).
+  // Calling getUserMedia inside the immediate useEffect on mount fails silently on those engines
+  // because there is no user gesture in the call stack. The "Start camera" button below provides
+  // the gesture and shows a clear error if anything goes wrong.
+  const startCamera = React.useCallback(async () => {
+    if (cameraReady || cameraStarting) return;
+    setCameraError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraError('mediaDevices_unavailable');
+      return;
+    }
+    setCameraStarting(true);
+    try {
+      // Request the rear camera; gracefully fall back to any camera the device offers.
+      let stream;
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { exact: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
         });
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-          setCameraReady(true);
-        }
-      } catch (err) {
-        setCameraError(err.message || 'permission_denied');
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
       }
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.muted = true;
+        videoRef.current.setAttribute('playsinline', 'true');
+        try { await videoRef.current.play(); } catch {}
+        setCameraReady(true);
+      }
+    } catch (err) {
+      const code = err?.name || err?.message || 'unknown';
+      setCameraError(code);
+    } finally {
+      setCameraStarting(false);
     }
-    start();
+  }, [cameraReady, cameraStarting]);
+
+  React.useEffect(() => {
     return () => {
-      cancelled = true;
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach(t => t.stop());
+        streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
     };
@@ -140,7 +163,7 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           objectFit: 'cover',
         }} />
       )}
-      {!cameraReady && !cameraError && (
+      {!cameraReady && (
         <div style={{
           position: 'absolute', inset: 0,
           background: `
@@ -150,19 +173,43 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           `,
         }} />
       )}
-      {cameraError && (
+      {!cameraReady && (
         <div style={{
           position: 'absolute', inset: 0, padding: 32,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          background: 'linear-gradient(180deg, #1a1520 0%, #0a0815 100%)', textAlign: 'center',
+          textAlign: 'center', zIndex: 6,
         }}>
-          <div style={{ fontSize: 38 }}>📷</div>
-          <div style={{ color: T.text, fontSize: 16, fontWeight: 700, marginTop: 12 }}>
-            {t.cameraDenied}
+          <div style={{ fontSize: 56 }}>📷</div>
+          <div style={{ color: T.text, fontSize: 16, fontWeight: 700, marginTop: 16 }}>
+            {cameraError ? t.cameraDenied : (lang === 'th' ? 'แตะเพื่อเปิดกล้อง' : 'Tap to enable camera')}
           </div>
-          <div style={{ color: T.muted, fontSize: 13, marginTop: 6, maxWidth: 280 }}>
-            {t.cameraDeniedHelp}
+          <div style={{ color: T.muted, fontSize: 13, marginTop: 6, maxWidth: 300, lineHeight: 1.4 }}>
+            {cameraError
+              ? `${t.cameraDeniedHelp} (${cameraError})`
+              : (lang === 'th'
+                  ? 'ต้องอนุญาตกล้องครั้งแรกก่อน'
+                  : 'Browser needs your permission first')}
           </div>
+          <button
+            onClick={startCamera}
+            disabled={cameraStarting}
+            style={{
+              marginTop: 20,
+              padding: '12px 28px',
+              borderRadius: 16,
+              background: `linear-gradient(135deg, ${T.accent}, ${T.accent3})`,
+              border: 'none', color: '#fff',
+              fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
+              cursor: cameraStarting ? 'default' : 'pointer',
+              opacity: cameraStarting ? 0.6 : 1,
+              boxShadow: '0 8px 24px rgba(124,92,255,0.4)',
+            }}>
+            {cameraStarting
+              ? (lang === 'th' ? 'กำลังเปิด…' : 'Starting…')
+              : cameraError
+                ? (lang === 'th' ? 'ลองอีกครั้ง' : 'Try again')
+                : (lang === 'th' ? 'เปิดกล้อง' : 'Enable camera')}
+          </button>
         </div>
       )}
       {/* Vignette */}

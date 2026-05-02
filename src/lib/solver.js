@@ -20,34 +20,44 @@ function expandMoves(faces) {
   return out;
 }
 
-// IDA* with simple cancellation pruning. Effective for short scrambles (≤ ~10 moves).
-function idaStarSolve(start, maxDepth = 11) {
+// IDA* with cancellation pruning. Effective for shallow-to-moderate scrambles (≤ ~13 moves).
+// Uses a wall-clock budget so the UI stays responsive — if a depth exceeds it, the search bails
+// and the caller can decide whether to surface a "scramble too deep" message.
+function idaStarSolve(start, maxDepth = 13, budgetMs = 4000) {
   if (isSolved(start)) return [];
   const moves = expandMoves(FACES_3);
   const axis = { U: 0, D: 0, L: 1, R: 1, F: 2, B: 2 };
+  const deadline = Date.now() + budgetMs;
+  let aborted = false;
 
   function dfs(cube, depth, path, lastFace, lastAxis) {
+    if (Date.now() > deadline) { aborted = true; return null; }
     if (depth === 0) return isSolved(cube) ? path : null;
-    if (depth <= 4 && isSolved(cube)) return path;
+    if (isSolved(cube)) return path;
     for (const m of moves) {
-      // skip same-face redundancy
+      // skip same-face redundancy (R then R' or R2 collapses to fewer moves than 'depth' represents)
       if (lastFace === m.face) continue;
-      // skip opposite-face same-axis duplicates (canonical order)
+      // skip opposite-face same-axis duplicates with canonical ordering (e.g., always U before D)
       if (lastAxis === axis[m.face] && lastFace && lastFace > m.face) continue;
       applyMove(cube, m.face, m.dir);
       path.push(m);
       const r = dfs(cube, depth - 1, path, m.face, axis[m.face]);
       if (r) return r;
       path.pop();
-      applyMove(cube, m.face, -m.dir === 0 ? 2 : -m.dir);
+      // Reverse move
+      const rev = m.dir === 2 ? 2 : -m.dir;
+      applyMove(cube, m.face, rev);
+      if (aborted) return null;
     }
     return null;
   }
 
   for (let d = 1; d <= maxDepth; d++) {
+    if (Date.now() > deadline) break;
     const probe = cloneCube(start);
     const r = dfs(probe, d, [], null, null);
     if (r) return r;
+    if (aborted) break;
   }
   return null;
 }
@@ -176,11 +186,26 @@ export function solveCube(cube, options = {}) {
     return { moves: opt, method: mode === 'fastest' ? 'Kociemba-equiv' : 'CFOP', exact: true };
   }
 
-  if (cube.n === 3 || cube.n === 2) {
-    const ida = idaStarSolve(cube, cube.n === 2 ? 14 : 11);
-    if (ida) return { moves: optimizeMoves(ida), method: mode === 'fastest' ? 'Kociemba' : 'CFOP', exact: true };
-    const lbl = lblSolve(cube);
-    if (lbl) return { moves: optimizeMoves(lbl), method: 'LBL', exact: false };
+  if (cube.n === 3) {
+    const ida = idaStarSolve(cube, 13, 4500);
+    if (ida && ida.length > 0) {
+      const verify = cloneCube(cube);
+      applyMoves(verify, ida);
+      if (isSolved(verify)) {
+        return { moves: optimizeMoves(ida), method: mode === 'fastest' ? 'Kociemba' : 'CFOP', exact: true };
+      }
+    }
+    // Couldn't solve within budget — be honest with the caller.
+    return { moves: [], method: 'unsolved', exact: false, error: 'depth_exceeded' };
+  }
+  if (cube.n === 2) {
+    const ida = idaStarSolve(cube, 14, 4500);
+    if (ida) {
+      const verify = cloneCube(cube);
+      applyMoves(verify, ida);
+      if (isSolved(verify)) return { moves: optimizeMoves(ida), method: 'Ortega', exact: true };
+    }
+    return { moves: [], method: 'unsolved', exact: false, error: 'depth_exceeded' };
   }
 
   // 4×4+ educational demo path
