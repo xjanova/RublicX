@@ -6,6 +6,7 @@ import UpdateBanner from './components/UpdateBanner.jsx';
 import HomeScreen from './screens/HomeScreen.jsx';
 import LearnScreen from './screens/LearnScreen.jsx';
 import ScanScreen from './screens/ScanScreen.jsx';
+import ReviewScreen from './screens/ReviewScreen.jsx';
 import SolverScreen from './screens/SolverScreen.jsx';
 import TimerScreen from './screens/TimerScreen.jsx';
 import ProfileScreen from './screens/ProfileScreen.jsx';
@@ -23,9 +24,15 @@ function Shell() {
   }, []);
   const [tab, setTab] = React.useState(initialTab);
   const [scanResult, setScanResult] = React.useState(null);
+  const [reviewedResult, setReviewedResult] = React.useState(null);
 
   const onScanComplete = (result) => {
     setScanResult(result);
+    setReviewedResult(null);
+    setTab('review');
+  };
+  const onReviewConfirm = (result) => {
+    setReviewedResult(result);
     setTab('solver');
   };
 
@@ -34,7 +41,15 @@ function Shell() {
       case 'home': return <HomeScreen onNavigate={setTab} />;
       case 'learn': return <LearnScreen />;
       case 'scan': return <ScanScreen onScanComplete={onScanComplete} onBack={() => setTab('home')} />;
-      case 'solver': return <SolverScreen scanResult={scanResult} />;
+      case 'review': return (
+        <ReviewScreen
+          scanResult={scanResult}
+          onConfirm={onReviewConfirm}
+          onRescan={() => setTab('scan')}
+          onBack={() => setTab('scan')}
+        />
+      );
+      case 'solver': return <SolverScreen scanResult={reviewedResult || scanResult} />;
       case 'timer': return <TimerScreen />;
       case 'profile': return <ProfileScreen />;
       default: return <HomeScreen onNavigate={setTab} />;
