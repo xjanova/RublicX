@@ -23,6 +23,10 @@ android/app/debug/
 *.keystore
 *.jks
 *.apk
+*.password
+*.password.txt
+.keystore-password*
+secrets.txt
 *.aab
 .gradle/
 local.properties

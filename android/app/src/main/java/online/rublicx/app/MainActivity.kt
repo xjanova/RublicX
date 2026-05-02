@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.View
+import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -94,18 +95,35 @@ class MainActivity : AppCompatActivity() {
         wv.webViewClient = WebViewClient()
         wv.webChromeClient = object : WebChromeClient() {
             override fun onPermissionRequest(request: PermissionRequest) {
-                val needsCamera = request.resources.any { it == PermissionRequest.RESOURCE_VIDEO_CAPTURE }
-                if (needsCamera) {
-                    if (ActivityCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
-                        == PackageManager.PERMISSION_GRANTED) {
-                        request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                runOnUiThread {
+                    val resourcesList = request.resources.toList()
+                    android.util.Log.i("RublicX-Web",
+                        "WebView permission request: ${resourcesList.joinToString()} from ${request.origin}")
+                    val needsCamera = resourcesList.any { it == PermissionRequest.RESOURCE_VIDEO_CAPTURE }
+                    if (needsCamera) {
+                        if (ActivityCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CAMERA)
+                            == PackageManager.PERMISSION_GRANTED) {
+                            android.util.Log.i("RublicX-Web", "Granting camera (already authorized)")
+                            request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                        } else {
+                            android.util.Log.i("RublicX-Web", "Requesting CAMERA from user")
+                            pendingCameraRequest = request
+                            cameraPermission.launch(Manifest.permission.CAMERA)
+                        }
                     } else {
-                        pendingCameraRequest = request
-                        cameraPermission.launch(Manifest.permission.CAMERA)
+                        android.util.Log.i("RublicX-Web", "Denying non-camera permission request")
+                        request.deny()
                     }
-                } else {
-                    request.deny()
                 }
+            }
+            // Forward all JS console output to Logcat tagged 'RublicX-Web' so we can debug the
+            // web app's getUserMedia attempts via `adb logcat -s RublicX-Web`.
+            override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                val level = message.messageLevel().name
+                val src = message.sourceId()?.substringAfterLast('/') ?: ""
+                android.util.Log.i("RublicX-Web",
+                    "[$level] $src:${message.lineNumber()} ${message.message()}")
+                return true
             }
         }
     }
