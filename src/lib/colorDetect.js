@@ -9,9 +9,14 @@
 
 import { HEX_BY_FACE, FACE_NAMES, FACE_INDEX } from './cube.js';
 
-function hexToRgb(hex) {
+export function hexToRgb(hex) {
   const h = hex.replace('#', '');
   return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+export function rgbToHex([r, g, b]) {
+  const c = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  return '#' + c(r) + c(g) + c(b);
 }
 
 function srgbToLinear(c) {
@@ -45,28 +50,89 @@ function labDist(a, b) {
 // Sample a frame's grid cells. `frameCanvasCtx` = 2d ctx. `frameW/H` = canvas dimensions.
 // `gridX, gridY, gridW, gridH` = bounding rect of the N×N detection grid in canvas coords.
 // Returns an N×N array of [r,g,b] sampled from the inner 60% of each cell.
+//
+// Uses median per channel (more robust to specular highlights / hot pixels than mean).
+// For preview-rate sampling we want this to be fast — we subsample every 4th pixel.
 export function sampleGrid(ctx, frameW, frameH, n, rect) {
   const { x, y, w, h } = rect;
   const out = [];
   const cellW = w / n, cellH = h / n;
-  const inset = 0.2; // 60% inner sample box
+  const inset = 0.18;
   for (let r = 0; r < n; r++) {
     const row = [];
     for (let c = 0; c < n; c++) {
-      const cx = x + cellW * (c + inset);
-      const cy = y + cellH * (r + inset);
-      const cw = cellW * (1 - 2 * inset);
-      const ch = cellH * (1 - 2 * inset);
-      const px = ctx.getImageData(Math.round(cx), Math.round(cy), Math.max(1, Math.round(cw)), Math.max(1, Math.round(ch)));
-      let R = 0, G = 0, B = 0, n2 = 0;
-      for (let i = 0; i < px.data.length; i += 4) {
-        R += px.data[i]; G += px.data[i + 1]; B += px.data[i + 2]; n2++;
+      const cx = Math.round(x + cellW * (c + inset));
+      const cy = Math.round(y + cellH * (r + inset));
+      const cw = Math.max(2, Math.round(cellW * (1 - 2 * inset)));
+      const ch = Math.max(2, Math.round(cellH * (1 - 2 * inset)));
+      const px = ctx.getImageData(cx, cy, cw, ch);
+      const Rs = [], Gs = [], Bs = [];
+      // Subsample every 4th pixel (skip 16 bytes between picks) — enough for stable median.
+      const step = 16;
+      for (let i = 0; i < px.data.length; i += step) {
+        // Drop very dark / very bright pixels (likely shadow / specular highlight).
+        const lum = (px.data[i] + px.data[i + 1] + px.data[i + 2]) / 3;
+        if (lum < 18 || lum > 245) continue;
+        Rs.push(px.data[i]); Gs.push(px.data[i + 1]); Bs.push(px.data[i + 2]);
       }
-      row.push([R / n2, G / n2, B / n2]);
+      if (Rs.length === 0) {
+        // Fallback to mean over all sampled pixels if too aggressive a filter.
+        let R = 0, G = 0, B = 0, n2 = 0;
+        for (let i = 0; i < px.data.length; i += step) {
+          R += px.data[i]; G += px.data[i + 1]; B += px.data[i + 2]; n2++;
+        }
+        row.push([R / Math.max(1, n2), G / Math.max(1, n2), B / Math.max(1, n2)]);
+      } else {
+        Rs.sort((a, b) => a - b); Gs.sort((a, b) => a - b); Bs.sort((a, b) => a - b);
+        const mid = Math.floor(Rs.length / 2);
+        row.push([Rs[mid], Gs[mid], Bs[mid]]);
+      }
     }
     out.push(row);
   }
   return out;
+}
+
+// Score a single sample's confidence as a recognizable cube color: how close (in LAB) is it
+// to its nearest standard cube color, normalized into [0..1]. 1 = perfect match.
+export function rgbConfidence(rgb) {
+  const lab = rgbToLab(rgb);
+  let bestD = Infinity;
+  for (const hex of HEX_BY_FACE) {
+    const stdLab = rgbToLab(hexToRgb(hex));
+    const d = labDist(lab, stdLab);
+    if (d < bestD) bestD = d;
+  }
+  // Typical LAB distance for "same color under realistic lighting" is ≤ 200.
+  // A perfect match is 0; ≥ 800 is a wildly off color.
+  return Math.max(0, Math.min(1, 1 - Math.sqrt(bestD) / 28));
+}
+
+// How much did two samples (each N×N RGB) drift between frames? Lower = more stable.
+// Returns the maximum per-cell LAB distance across the grid.
+export function frameDrift(prev, cur) {
+  if (!prev || !cur || prev.length !== cur.length) return Infinity;
+  let maxD = 0;
+  for (let r = 0; r < prev.length; r++) {
+    for (let c = 0; c < prev[r].length; c++) {
+      const a = rgbToLab(prev[r][c]);
+      const b = rgbToLab(cur[r][c]);
+      const d = labDist(a, b);
+      if (d > maxD) maxD = d;
+    }
+  }
+  return Math.sqrt(maxD);
+}
+
+// Aggregate confidence: minimum cell confidence across the whole grid.
+// (One bad cell drops the whole frame — we want all 9 cells solid before firing capture.)
+export function gridConfidence(grid) {
+  let minC = 1;
+  for (const row of grid) for (const rgb of row) {
+    const c = rgbConfidence(rgb);
+    if (c < minC) minC = c;
+  }
+  return minC;
 }
 
 // k-means in LAB space, init = standard cube colors. samples is a flat array of [r,g,b].

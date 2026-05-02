@@ -3,7 +3,10 @@ import { T } from '../theme.js';
 import { useI18n, FACE_LABELS, SCAN_INSTRUCTIONS } from '../i18n.jsx';
 import CubeNet from '../components/CubeNet.jsx';
 import { CameraIcon, ChevronLeftIcon, InfoIcon, SparkIcon, CheckIcon } from '../components/Icons.jsx';
-import { sampleGrid, kmeansFaces } from '../lib/colorDetect.js';
+import {
+  sampleGrid, kmeansFaces, rgbConfidence, frameDrift, gridConfidence,
+  hexToRgb, rgbToHex, nearestStandardColor,
+} from '../lib/colorDetect.js';
 import { HEX_BY_FACE } from '../lib/cube.js';
 
 const SCAN_FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
@@ -16,24 +19,39 @@ const SIZE_OPTIONS = [
   { n: 5, label: '5×5', subKey: 'professorSub' },
 ];
 
+// Auto-capture thresholds. Tuned empirically:
+//   - Per-cell LAB distance to standard cube color ≤ 12 → "confident"
+//   - Frame-to-frame drift ≤ 10 → "stable"
+//   - Both must hold for STABILITY_FRAMES consecutive samples → fire capture
+const STABILITY_FRAMES = 4;
+const CONFIDENCE_THRESHOLD = 0.62;
+const DRIFT_THRESHOLD = 12;
+const SAMPLE_INTERVAL_MS = 220;
+
 export default function ScanScreen({ onScanComplete, onBack }) {
   const { t, lang } = useI18n();
   const [cubeSize, setCubeSize] = React.useState(3);
   const [faceIdx, setFaceIdx] = React.useState(0);
   const [scannedFaces, setScannedFaces] = React.useState({});
   const [pulse, setPulse] = React.useState(false);
-  const [confidence, setConfidence] = React.useState(0.94);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [cameraError, setCameraError] = React.useState(null);
   const [cameraStarting, setCameraStarting] = React.useState(false);
-  const [allSamples, setAllSamples] = React.useState([]); // for k-means at end
+
+  // Live preview + auto-capture state
+  const [livePreview, setLivePreview] = React.useState(null);   // current N×N RGB grid for the scan target
+  const [confidence, setConfidence] = React.useState(0);        // 0..1
+  const [stableCount, setStableCount] = React.useState(0);
+  const [autoCountdown, setAutoCountdown] = React.useState(0);  // STABILITY_FRAMES..0; 0 = not active
+  const [allSamples, setAllSamples] = React.useState([]);
+
   const videoRef = React.useRef(null);
   const streamRef = React.useRef(null);
+  const sampleCanvasRef = React.useRef(null);
+  const sampleTimerRef = React.useRef(null);
+  const lastGridRef = React.useRef(null);
+  const captureLockRef = React.useRef(false);
 
-  // We START the camera lazily on user tap (required by iOS Safari and some Android WebViews).
-  // Calling getUserMedia inside the immediate useEffect on mount fails silently on those engines
-  // because there is no user gesture in the call stack. The "Start camera" button below provides
-  // the gesture and shows a clear error if anything goes wrong.
   const startCamera = React.useCallback(async () => {
     if (cameraReady || cameraStarting) return;
     setCameraError(null);
@@ -43,7 +61,6 @@ export default function ScanScreen({ onScanComplete, onBack }) {
     }
     setCameraStarting(true);
     try {
-      // Request the rear camera; gracefully fall back to any camera the device offers.
       let stream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -65,15 +82,16 @@ export default function ScanScreen({ onScanComplete, onBack }) {
         setCameraReady(true);
       }
     } catch (err) {
-      const code = err?.name || err?.message || 'unknown';
-      setCameraError(code);
+      setCameraError(err?.name || err?.message || 'unknown');
     } finally {
       setCameraStarting(false);
     }
   }, [cameraReady, cameraStarting]);
 
+  // Cleanup on unmount
   React.useEffect(() => {
     return () => {
+      if (sampleTimerRef.current) clearInterval(sampleTimerRef.current);
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
@@ -81,128 +99,180 @@ export default function ScanScreen({ onScanComplete, onBack }) {
     };
   }, []);
 
+  // Reset face / scanned state when cube size changes
   React.useEffect(() => {
     setScannedFaces({});
     setFaceIdx(0);
     setAllSamples([]);
+    setLivePreview(null);
+    setStableCount(0);
+    setAutoCountdown(0);
+    lastGridRef.current = null;
   }, [cubeSize]);
 
   const currentFace = SCAN_FACES[faceIdx];
-  const palette = HEX_BY_FACE;
+  const allDone = Object.keys(scannedFaces).length === 6;
 
-  const captureFace = () => {
-    setPulse(true);
-    setConfidence(0.86 + Math.random() * 0.13);
-    let cells;
-    try {
-      const video = videoRef.current;
-      if (video && video.videoWidth) {
-        const c = document.createElement('canvas');
-        c.width = video.videoWidth;
-        c.height = video.videoHeight;
-        const ctx = c.getContext('2d', { willReadFrequently: true });
-        ctx.drawImage(video, 0, 0, c.width, c.height);
-        const minSide = Math.min(c.width, c.height);
-        const gridSize = minSide * 0.55;
-        const rect = {
-          x: (c.width - gridSize) / 2,
-          y: (c.height - gridSize) / 2,
-          w: gridSize,
-          h: gridSize,
-        };
-        const samples = sampleGrid(ctx, c.width, c.height, cubeSize, rect);
-        cells = samples.flat();
-      }
-    } catch (e) {
-      cells = null;
+  // Sample the current frame's grid into livePreview state.
+  const sampleNow = React.useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return null;
+    let canvas = sampleCanvasRef.current;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      sampleCanvasRef.current = canvas;
     }
-    if (!cells) cells = simulatedFace(cubeSize, currentFace);
+    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const minSide = Math.min(canvas.width, canvas.height);
+    const gridSize = minSide * 0.55;
+    const rect = {
+      x: (canvas.width - gridSize) / 2,
+      y: (canvas.height - gridSize) / 2,
+      w: gridSize,
+      h: gridSize,
+    };
+    return sampleGrid(ctx, canvas.width, canvas.height, cubeSize, rect);
+  }, [cubeSize]);
 
+  // Continuous sampling loop while camera is ready and we still have faces to scan.
+  React.useEffect(() => {
+    if (!cameraReady || allDone) {
+      if (sampleTimerRef.current) {
+        clearInterval(sampleTimerRef.current);
+        sampleTimerRef.current = null;
+      }
+      return;
+    }
+    sampleTimerRef.current = setInterval(() => {
+      if (captureLockRef.current) return;
+      const grid = sampleNow();
+      if (!grid) return;
+      setLivePreview(grid);
+      const conf = gridConfidence(grid);
+      setConfidence(conf);
+      const drift = frameDrift(lastGridRef.current, grid);
+      lastGridRef.current = grid;
+      const isStable = drift < DRIFT_THRESHOLD;
+      const isConfident = conf > CONFIDENCE_THRESHOLD;
+      if (isStable && isConfident) {
+        setStableCount((s) => {
+          const next = Math.min(STABILITY_FRAMES, s + 1);
+          setAutoCountdown(STABILITY_FRAMES - next);
+          if (next >= STABILITY_FRAMES) {
+            // Auto-fire capture
+            captureLockRef.current = true;
+            setTimeout(() => doCapture(grid), 80);
+          }
+          return next;
+        });
+      } else {
+        setStableCount(0);
+        setAutoCountdown(0);
+      }
+    }, SAMPLE_INTERVAL_MS);
+    return () => {
+      if (sampleTimerRef.current) clearInterval(sampleTimerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraReady, allDone, cubeSize, sampleNow]);
+
+  const doCapture = (gridOverride) => {
+    setPulse(true);
+    const grid = gridOverride || sampleNow() || simulatedGrid(cubeSize);
+    const cells = grid.flat();
     setTimeout(() => {
       const updated = { ...scannedFaces };
-      const updatedSamples = [...allSamples, ...cells.map(rgb => ({ face: currentFace, rgb }))];
+      const updatedSamples = [...allSamples, ...cells.map((rgb) => ({ face: currentFace, rgb }))];
       setAllSamples(updatedSamples);
-
       if (faceIdx === SCAN_FACES.length - 1) {
-        // All 6 faces collected — do final k-means classification.
-        const flat = updatedSamples.map(s => s.rgb);
+        // All 6 faces collected — final classification with k-means over the union.
+        const flat = updatedSamples.map((s) => s.rgb);
         const { assignments } = kmeansFaces(flat);
         let p = 0;
         for (const fname of SCAN_FACES) {
           const slice = assignments.slice(p, p + cubeSize * cubeSize);
-          updated[fname] = slice.map(idx => palette[idx]);
+          updated[fname] = slice.map((idx) => HEX_BY_FACE[idx]);
           p += cubeSize * cubeSize;
         }
         setScannedFaces(updated);
         setPulse(false);
-        // signal completion
-        setTimeout(() => onScanComplete?.({ size: cubeSize, faces: updated }), 200);
+        captureLockRef.current = false;
+        setTimeout(() => onScanComplete?.({ size: cubeSize, faces: updated }), 250);
       } else {
-        // Show provisional colors using nearest-standard for now; will be re-classified at end.
-        const provisional = cells.map(rgb => nearest(rgb));
-        updated[currentFace] = provisional;
+        // Provisional per-cell mapping; final classification happens on last face.
+        updated[currentFace] = cells.map((rgb) => HEX_BY_FACE[nearestStandardColor(rgb)]);
         setScannedFaces(updated);
-        setFaceIdx(i => i + 1);
+        setFaceIdx((i) => i + 1);
+        setStableCount(0);
+        setAutoCountdown(0);
+        lastGridRef.current = null;
         setPulse(false);
+        captureLockRef.current = false;
       }
-    }, 500);
+    }, 320);
   };
-
-  const totalScanned = Object.keys(scannedFaces).length;
-  const allDone = totalScanned === 6;
 
   return (
     <div style={{
       position: 'relative', width: '100%', height: '100%',
       background: '#000', overflow: 'hidden',
     }}>
-      {/* Camera feed */}
-      {cameraReady && !cameraError && (
-        <video ref={videoRef} autoPlay playsInline muted style={{
-          position: 'absolute', inset: 0, width: '100%', height: '100%',
-          objectFit: 'cover',
-        }} />
-      )}
-      {!cameraReady && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: `
-            radial-gradient(ellipse at 30% 20%, rgba(60,40,90,0.4) 0%, transparent 50%),
-            radial-gradient(ellipse at 70% 80%, rgba(120,60,40,0.3) 0%, transparent 55%),
-            linear-gradient(180deg, #1a1520 0%, #0a0815 100%)
-          `,
-        }} />
-      )}
+      {/* Camera feed (always rendered so we can call play() on it before showing UI). */}
+      <video ref={videoRef} autoPlay playsInline muted style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        objectFit: 'cover',
+        opacity: cameraReady ? 1 : 0,
+        transition: 'opacity 0.2s',
+      }} />
+
+      {/* Camera-disabled full-screen overlay (covers everything else, zIndex 50). */}
       {!cameraReady && (
         <div style={{
           position: 'absolute', inset: 0, padding: 32,
           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-          textAlign: 'center', zIndex: 6,
+          textAlign: 'center', zIndex: 50,
+          background: 'linear-gradient(180deg, #1a1520 0%, #0a0815 100%)',
         }}>
+          <button onClick={onBack} aria-label="Back" style={{
+            position: 'absolute', top: 56, left: 16,
+            width: 40, height: 40, borderRadius: 20,
+            background: 'rgba(0,0,0,0.45)', border: '0.5px solid rgba(255,255,255,0.15)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: 'pointer', color: '#fff',
+          }}>
+            <ChevronLeftIcon />
+          </button>
+
           <div style={{ fontSize: 56 }}>📷</div>
-          <div style={{ color: T.text, fontSize: 16, fontWeight: 700, marginTop: 16 }}>
+          <div style={{ color: T.text, fontSize: 18, fontWeight: 700, marginTop: 16 }}>
             {cameraError ? t.cameraDenied : (lang === 'th' ? 'แตะเพื่อเปิดกล้อง' : 'Tap to enable camera')}
           </div>
-          <div style={{ color: T.muted, fontSize: 13, marginTop: 6, maxWidth: 300, lineHeight: 1.4 }}>
+          <div style={{ color: T.muted, fontSize: 13, marginTop: 8, maxWidth: 320, lineHeight: 1.5 }}>
             {cameraError
-              ? `${t.cameraDeniedHelp} (${cameraError})`
+              ? `${t.cameraDeniedHelp}\n(${cameraError})`
               : (lang === 'th'
-                  ? 'ต้องอนุญาตกล้องครั้งแรกก่อน'
-                  : 'Browser needs your permission first')}
+                  ? 'เบราว์เซอร์ต้องการสิทธิ์ก่อน กดปุ่มแล้วอนุญาต'
+                  : 'Browser needs your permission first. Tap and allow.')}
           </div>
           <button
             onClick={startCamera}
             disabled={cameraStarting}
             style={{
-              marginTop: 20,
-              padding: '12px 28px',
-              borderRadius: 16,
+              marginTop: 28,
+              padding: '14px 40px',
+              borderRadius: 18,
               background: `linear-gradient(135deg, ${T.accent}, ${T.accent3})`,
               border: 'none', color: '#fff',
-              fontSize: 14, fontWeight: 700, letterSpacing: 0.3,
+              fontSize: 15, fontWeight: 700, letterSpacing: 0.3,
               cursor: cameraStarting ? 'default' : 'pointer',
               opacity: cameraStarting ? 0.6 : 1,
-              boxShadow: '0 8px 24px rgba(124,92,255,0.4)',
+              boxShadow: '0 12px 32px rgba(124,92,255,0.5)',
+              touchAction: 'manipulation',
             }}>
             {cameraStarting
               ? (lang === 'th' ? 'กำลังเปิด…' : 'Starting…')
@@ -210,8 +280,17 @@ export default function ScanScreen({ onScanComplete, onBack }) {
                 ? (lang === 'th' ? 'ลองอีกครั้ง' : 'Try again')
                 : (lang === 'th' ? 'เปิดกล้อง' : 'Enable camera')}
           </button>
+
+          {!cameraError && (
+            <div style={{ color: T.dim, fontSize: 11, marginTop: 24, lineHeight: 1.5 }}>
+              {lang === 'th'
+                ? 'หากกดแล้วไม่ขึ้น popup ลองตรวจสอบสิทธิ์กล้องในตั้งค่าเบราว์เซอร์'
+                : 'If no prompt appears, check camera permissions in browser settings.'}
+            </div>
+          )}
         </div>
       )}
+
       {/* Vignette */}
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%',
@@ -243,11 +322,12 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           display: 'flex', alignItems: 'center', gap: 8,
         }}>
           <span style={{
-            width: 6, height: 6, borderRadius: 3, background: '#FF4D6D',
-            boxShadow: '0 0 8px rgba(255,77,109,0.8)',
+            width: 6, height: 6, borderRadius: 3,
+            background: stableCount >= STABILITY_FRAMES - 1 ? T.accent2 : '#FF4D6D',
+            boxShadow: `0 0 8px ${stableCount >= STABILITY_FRAMES - 1 ? T.accent2 : '#FF4D6D'}`,
             animation: 'recPulse 1.2s ease-in-out infinite',
           }} />
-          REC · {totalScanned}/6
+          REC · {Object.keys(scannedFaces).length}/6
         </div>
         <div aria-label="Info" style={{
           width: 40, height: 40, borderRadius: 20,
@@ -284,13 +364,21 @@ export default function ScanScreen({ onScanComplete, onBack }) {
         })}
       </div>
 
-      {/* Scan target */}
+      {/* Scan target with live cell preview */}
       <div style={{
         position: 'absolute', top: '50%', left: '50%',
         transform: 'translate(-50%, -48%)',
         zIndex: 5,
       }}>
-        <ScanFrame size={250} n={cubeSize} pulse={pulse} />
+        <ScanFrame
+          size={250}
+          n={cubeSize}
+          pulse={pulse}
+          stable={stableCount >= STABILITY_FRAMES - 1}
+          countdown={autoCountdown}
+          stabilityFrames={STABILITY_FRAMES}
+          livePreview={livePreview}
+        />
       </div>
 
       {/* Instruction bubble */}
@@ -316,8 +404,9 @@ export default function ScanScreen({ onScanComplete, onBack }) {
           </div>
           <div style={{
             padding: '2px 6px', borderRadius: 6,
-            background: 'rgba(0,224,183,0.18)',
-            color: T.accent2, fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
+            background: confidence > CONFIDENCE_THRESHOLD ? 'rgba(0,224,183,0.18)' : 'rgba(255,77,109,0.18)',
+            color: confidence > CONFIDENCE_THRESHOLD ? T.accent2 : '#FF4D6D',
+            fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
           }}>{(confidence * 100).toFixed(0)}%</div>
         </div>
       </div>
@@ -368,7 +457,7 @@ export default function ScanScreen({ onScanComplete, onBack }) {
             {t.detected} · {cubeSize}×{cubeSize}
           </div>
           <div style={{ display: 'flex', gap: 4 }}>
-            {palette.map((c, i) => (
+            {HEX_BY_FACE.map((c, i) => (
               <div key={c} style={{
                 width: 14, height: 14, borderRadius: 3,
                 background: c,
@@ -380,7 +469,7 @@ export default function ScanScreen({ onScanComplete, onBack }) {
             ))}
           </div>
         </div>
-        <button onClick={captureFace} disabled={allDone} style={{
+        <button onClick={() => doCapture()} disabled={allDone} style={{
           width: '100%', height: 50, borderRadius: 16,
           background: allDone
             ? `linear-gradient(135deg, ${T.accent2} 0%, #00B894 100%)`
@@ -397,12 +486,21 @@ export default function ScanScreen({ onScanComplete, onBack }) {
             <><CameraIcon /> {t.captureFace} · {FACE_LABELS[lang][currentFace]}</>
           )}
         </button>
+        <div style={{
+          color: T.dim, fontSize: 10, fontWeight: 600,
+          textAlign: 'center', marginTop: 8, letterSpacing: 0.3,
+        }}>
+          {lang === 'th'
+            ? 'ถือลูกบาศก์ในกรอบ — โปรแกรมจะถ่ายเองเมื่อสีนิ่ง'
+            : 'Hold cube inside frame — auto-captures when colors are stable'}
+        </div>
       </div>
     </div>
   );
 }
 
-function ScanFrame({ size = 250, n = 3, pulse }) {
+function ScanFrame({ size = 250, n = 3, pulse, stable, countdown, stabilityFrames, livePreview }) {
+  const frameColor = stable ? T.accent2 : T.accent2;
   return (
     <div style={{
       width: size, height: size,
@@ -412,10 +510,10 @@ function ScanFrame({ size = 250, n = 3, pulse }) {
       transition: 'filter 0.3s',
     }}>
       {[
-        { top: 0, left: 0, borderTop: `2px solid ${T.accent2}`, borderLeft: `2px solid ${T.accent2}`, borderRadius: '14px 0 0 0' },
-        { top: 0, right: 0, borderTop: `2px solid ${T.accent2}`, borderRight: `2px solid ${T.accent2}`, borderRadius: '0 14px 0 0' },
-        { bottom: 0, left: 0, borderBottom: `2px solid ${T.accent2}`, borderLeft: `2px solid ${T.accent2}`, borderRadius: '0 0 0 14px' },
-        { bottom: 0, right: 0, borderBottom: `2px solid ${T.accent2}`, borderRight: `2px solid ${T.accent2}`, borderRadius: '0 0 14px 0' },
+        { top: 0, left: 0, borderTop: `2px solid ${frameColor}`, borderLeft: `2px solid ${frameColor}`, borderRadius: '14px 0 0 0' },
+        { top: 0, right: 0, borderTop: `2px solid ${frameColor}`, borderRight: `2px solid ${frameColor}`, borderRadius: '0 14px 0 0' },
+        { bottom: 0, left: 0, borderBottom: `2px solid ${frameColor}`, borderLeft: `2px solid ${frameColor}`, borderRadius: '0 0 0 14px' },
+        { bottom: 0, right: 0, borderBottom: `2px solid ${frameColor}`, borderRight: `2px solid ${frameColor}`, borderRadius: '0 0 14px 0' },
       ].map((s, i) => (
         <div key={i} style={{ position: 'absolute', width: 30, height: 30, ...s }} />
       ))}
@@ -426,58 +524,59 @@ function ScanFrame({ size = 250, n = 3, pulse }) {
         gridTemplateRows: `repeat(${n}, 1fr)`,
         gap: n <= 3 ? 6 : 4,
       }}>
-        {Array.from({ length: n * n }).map((_, i) => (
-          <div key={i} style={{
-            background: 'rgba(255,255,255,0.03)',
-            border: `1.5px solid rgba(0,224,183,${0.4 + (i % 3) * 0.15})`,
-            borderRadius: n <= 3 ? 8 : 5,
-            position: 'relative',
-          }}>
-            <div style={{
-              position: 'absolute', top: '50%', left: '50%',
-              transform: 'translate(-50%, -50%)',
-              width: n <= 3 ? 8 : 5, height: n <= 3 ? 8 : 5, borderRadius: '50%',
-              background: T.accent2, opacity: 0.55,
-              boxShadow: `0 0 6px ${T.accent2}`,
-            }} />
-          </div>
-        ))}
+        {Array.from({ length: n * n }).map((_, i) => {
+          const r = Math.floor(i / n), c = i % n;
+          const rgb = livePreview?.[r]?.[c];
+          const conf = rgb ? rgbConfidence(rgb) : 0;
+          const hex = rgb ? rgbToHex(rgb) : null;
+          return (
+            <div key={i} style={{
+              background: hex ? `${hex}cc` : 'rgba(255,255,255,0.03)',
+              border: `1.5px solid rgba(0,224,183,${0.4 + conf * 0.5})`,
+              borderRadius: n <= 3 ? 8 : 5,
+              position: 'relative',
+              transition: 'background 0.15s, border-color 0.15s',
+            }}>
+              <div style={{
+                position: 'absolute', top: '50%', left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: n <= 3 ? 6 : 4, height: n <= 3 ? 6 : 4, borderRadius: '50%',
+                background: T.accent2, opacity: 0.55 + conf * 0.4,
+                boxShadow: `0 0 6px ${T.accent2}`,
+              }} />
+            </div>
+          );
+        })}
       </div>
       <div style={{
         position: 'absolute', left: 14, right: 14, top: '50%',
         height: 2,
-        background: `linear-gradient(90deg, transparent 0%, ${T.accent2} 50%, transparent 100%)`,
-        boxShadow: `0 0 8px ${T.accent2}`,
+        background: `linear-gradient(90deg, transparent 0%, ${frameColor} 50%, transparent 100%)`,
+        boxShadow: `0 0 8px ${frameColor}`,
         animation: 'scanlineMove 2s ease-in-out infinite alternate',
       }} />
+      {countdown > 0 && (
+        <div style={{
+          position: 'absolute', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)',
+          fontSize: 64, fontWeight: 200,
+          color: '#fff',
+          textShadow: '0 0 24px rgba(0,224,183,0.8), 0 4px 16px rgba(0,0,0,0.6)',
+          fontFamily: 'JetBrains Mono, ui-monospace, monospace',
+          pointerEvents: 'none',
+        }}>{countdown}</div>
+      )}
     </div>
   );
 }
 
-// Fallback: simulate detected face colors when camera is unavailable.
-function simulatedFace(n, faceKey) {
-  const palette = HEX_BY_FACE;
-  const baseHexByFaceKey = { U: '#FFFFFF', D: '#FFD500', F: '#009B48', B: '#0046AD', L: '#FF5800', R: '#B71234' };
-  const base = baseHexByFaceKey[faceKey];
+function simulatedGrid(n) {
   const out = [];
-  for (let i = 0; i < n * n; i++) {
-    if (Math.random() < 0.6) out.push(hexRgb(base));
-    else out.push(hexRgb(palette[Math.floor(Math.random() * palette.length)]));
+  const palette = HEX_BY_FACE.map(hexToRgb);
+  for (let r = 0; r < n; r++) {
+    const row = [];
+    for (let c = 0; c < n; c++) row.push(palette[Math.floor(Math.random() * 6)]);
+    out.push(row);
   }
   return out;
-}
-
-function nearest(rgb) {
-  let best = 0, bestD = Infinity;
-  for (let k = 0; k < 6; k++) {
-    const std = hexRgb(HEX_BY_FACE[k]);
-    const d = (rgb[0] - std[0]) ** 2 + (rgb[1] - std[1]) ** 2 + (rgb[2] - std[2]) ** 2;
-    if (d < bestD) { bestD = d; best = k; }
-  }
-  return HEX_BY_FACE[best];
-}
-
-function hexRgb(h) {
-  const s = h.replace('#', '');
-  return [parseInt(s.slice(0, 2), 16), parseInt(s.slice(2, 4), 16), parseInt(s.slice(4, 6), 16)];
 }
