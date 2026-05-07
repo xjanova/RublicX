@@ -118,9 +118,12 @@ export function applyMove(cube, face, dir, layer = 0) {
 }
 
 // Parse SiGN notation like "R U R' U2 F'" into [{face, dir, layer, label}, ...]
-// Supports F R U L D B + ' (prime) + 2 (double). Lowercase = wide turn (touches 2 layers from that face).
-// Wide moves apply the outer face turn AND the slice underneath (for n >= 4).
-const FACE_RE = /^([UDFBLRudfblrMESxyz])([2'])?$/;
+// Supports:
+//   • F R U L D B + ' (prime) + 2 (double) — outer-layer turns
+//   • Lowercase r/u/f/d/l/b — wide turn (outer + adjacent inner)
+//   • Rw / Uw / etc. — explicit wide notation (same as lowercase)
+//   • M E S x y z — slice / rotation (treated like lowercase wide for now in 4×4 reduction context)
+const FACE_RE = /^([UDFBLR])(w)?([2'])?$|^([udfblrMESxyz])([2'])?$/;
 
 export function parseMoves(notation) {
   return notation
@@ -130,9 +133,17 @@ export function parseMoves(notation) {
     .map(tok => {
       const m = tok.match(FACE_RE);
       if (!m) throw new Error('bad move: ' + tok);
-      const [, raw, mod] = m;
+      // Branch 1: uppercase + optional 'w' + optional modifier (e.g. "R", "Rw", "Rw'", "R2")
+      // Branch 2: lowercase / slice / rotation + optional modifier (e.g. "r", "r'", "M2")
+      const upper = m[1];
+      const wMarker = m[2];
+      const upperMod = m[3];
+      const lower = m[4];
+      const lowerMod = m[5];
+      const raw = upper || lower;
+      const mod = upperMod || lowerMod;
       const dir = mod === "'" ? -1 : mod === '2' ? 2 : 1;
-      const isWide = raw === raw.toLowerCase() && 'udfblr'.includes(raw);
+      const isWide = !!wMarker || (raw === raw.toLowerCase() && 'udfblr'.includes(raw));
       const face = isWide ? raw.toUpperCase() : raw;
       return { face, dir, wide: isWide, label: tok };
     });
@@ -244,10 +255,29 @@ function sqDist(a, b) {
   return dr * dr + dg * dg + db * db;
 }
 
-// Validate a 3x3 cube for sticker counts (each color exactly 9).
+// Validate a cube for sticker counts (each color exactly N²).
 export function validateCubeStickerCounts(cube) {
   const counts = new Array(6).fill(0);
   for (const face of cube.faces) for (const v of face) counts[v]++;
   const expected = cube.n * cube.n;
   return counts.every(c => c === expected);
+}
+
+// Stricter validation for 3×3 (and any odd N): each face's center sticker must equal the
+// face's own color index. Centers don't physically move, so a scan with a center mismatch
+// (e.g., red↔orange detection swap) is unsolvable in our convention even if the per-color
+// counts happen to be right. Returns true if every center is at its correct color, false
+// otherwise. For 2×2 (no centers), trivially returns true.
+export function validateCubeCenters(cube) {
+  if (cube.n < 3 || cube.n % 2 === 0) return true;
+  const centerIdx = Math.floor(cube.n * cube.n / 2);
+  for (let f = 0; f < 6; f++) {
+    if (cube.faces[f][centerIdx] !== f) return false;
+  }
+  return true;
+}
+
+// One-shot "is this cube state plausible enough to solve" check.
+export function validateCubeState(cube) {
+  return validateCubeStickerCounts(cube) && validateCubeCenters(cube);
 }

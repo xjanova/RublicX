@@ -1,6 +1,6 @@
 # RublicX — Master the Cube
 
-Mobile-first web app that teaches you how to solve Rubik's cubes — beginner 2×2 up to 5×5, including pro and "secret" techniques. Built with **React + Three.js** so the cube renders, animates, and solves entirely on-device.
+Mobile-first web app that teaches you how to solve Rubik's cubes (2×2 and 3×3 today; 4×4/5×5 visualization in progress). Built with **React + Three.js** so the cube renders, animates, and solves entirely on-device.
 
 > **Live demo:** https://xjanova.github.io/RublicX/
 >
@@ -8,15 +8,22 @@ Mobile-first web app that teaches you how to solve Rubik's cubes — beginner 2�
 
 ## Features
 
-- **3D cube renderer** (Three.js via `@react-three/fiber`) — drag-to-rotate, smooth face-rotation animation, supports any N×N×N from 2×2 up to 5×5.
-- **Camera scanner** — `getUserMedia` capture, per-cell RGB sampling, **k-means clustering in CIELAB** with auto white-balance for robust sticker color identification.
-- **On-device solver** — IDA* search with cancellation pruning for shallow scrambles; LBL fallback for any valid 3×3 state. When the cube was scrambled inside the app, the inverse solution is returned instantly.
-- **Method-based teaching** — curated CFOP / OLL / PLL algorithms with side-by-side animated playback.
-- **Speed timer** — hold-to-ready, scramble generator, last-12 sparkline, persistent local history.
-- **Profile** — XP, weekly goal ring, achievements, language toggle, version + auto-update CTA.
+- **3D cube renderer** (Three.js via `@react-three/fiber`) — drag-to-rotate, smooth face-rotation animation, renders any N×N×N from 2×2 up to 5×5 (rendering only; solving is 2×2/3×3 today).
+- **Camera scanner** — `getUserMedia` capture, per-cell RGB sampling, **k-means clustering in CIELAB** with auto white-balance for robust sticker color identification. Currently exposed for 2×2 and 3×3.
+- **Real Kociemba two-phase solver** — uses the [`cubejs`](https://www.npmjs.com/package/cubejs) implementation of Herbert Kociemba's two-phase algorithm. Always returns a solution in **≤22 moves** for any valid 3×3 sticker state, in 1–50 ms once pruning tables are built (~1.5 s warm-up on first solve, kicked off on app start). When the cube was scrambled inside the app, the exact inverse is returned instantly. The 2×2 path uses bounded IDA*. **Failure modes are surfaced honestly**: invalid scan / wrong sticker counts → "Scan incomplete" with a Rescan CTA; solver still warming up → "Warming up solver…"; never a fake "demo" sequence presented as the user's solution.
+- **Method-based learning** — a curated CFOP walkthrough plus a small library of common F2L / OLL / PLL algorithms. The Method tab is labeled clearly as a generic walkthrough, not as the solution to your specific cube.
+- **Speed timer** — hold-to-ready, scramble generator, last-12 sparkline, persistent local history. New users start with an empty history (no fake seed times).
+- **Real profile** — XP / level / streak / best time / total solves / algs viewed are all sourced from real local activity (`lib/stats.js`), not hardcoded. New users see Lv. 1, 0 solves, 0-day streak. Achievements (Sub-30, Sub-20, Sub-15, 3- and 7-day streaks, 10/50 solves, 10 algs viewed, full library) unlock from real predicates.
 - **Bilingual** — Thai (IBM Plex Sans Thai) / English (Inter), instant toggle.
 - **Auto-update** — service worker checks for new builds every 5 minutes; the Profile screen surfaces an "Update now" button when one is available.
 - **Auto-release** — every push to `main` builds, deploys to GitHub Pages, and creates a tagged GitHub Release with a versioned zip of the build.
+
+## What's not yet shipped
+
+To stay honest about the gap between the demo and a finished product:
+
+- **4×4 / 5×5 solving.** The 3D renderer handles any N, and the Scan tab will eventually scan 4×4/5×5, but a real reduction-method solver isn't wired yet. Those sizes are intentionally hidden from the Scan size selector; turning them back on without a solver would lead the user through six faces of scanning only to land on "Size not yet supported."
+- **Full OLL/PLL libraries.** The Learn tab counts the algorithms it actually contains rather than claiming the full 57 OLL / 21 PLL. Expanding the library is straightforward — add entries to `TUTORIAL_ALGS` in `src/lib/solver.js` and the counts on the Lessons screen update automatically.
 
 ## Quick start
 
@@ -45,7 +52,10 @@ src/
     Icons.jsx               # All UI icons
   lib/
     cube.js                 # Cube state model + move primitives + scramble
-    solver.js               # IDA* + LBL solver + tutorial alg library
+    solver.js               # Public solve API + 2×2 IDA* + tutorial alg library
+    kociemba.js             # 3×3 Kociemba two-phase wrapper (cubejs)
+    solver-shared.js        # Shared move-sequence optimization helpers
+    stats.js                # Real persistent stats (XP, streaks, achievements)
     colorDetect.js          # RGB → LAB + k-means + auto WB
   screens/
     HomeScreen.jsx
@@ -80,9 +90,12 @@ To enable: in GitHub repo Settings → Pages, set "Source" to **GitHub Actions**
 
 ## Solver notes
 
-For arbitrary scanned cube states the solver runs IDA* with cancellation up to depth 11 (≤2s on a phone for typical cases). Depths beyond that fall through to a structural-distance LBL pass that always finds *a* solution but isn't optimal. For app-generated scrambles the solver returns the exact inverse instantly.
+`solveCube(cube, options)` is the public entry point. Logic in `src/lib/solver.js`:
 
-If you want sub-20-move solutions for arbitrary states, swap `lib/solver.js` for a Kociemba two-phase implementation — the public API (`solveCube(cube, options)`) is stable.
+1. **App-generated scramble path.** When a `history` of in-app moves is supplied, the solver inverts and optimizes it (always optimal, sub-millisecond).
+2. **Kociemba path (3×3, scanned cubes).** `src/lib/kociemba.js` wraps `cubejs`. We convert this app's face/sticker model to the canonical 54-character facelet string (`U R F D L B`, row-major), call `Cube.fromString(facelet).solve()`, and parse the resulting move string back into our internal `{face, dir, label}` move format. Pruning tables are built lazily; `warmupKociemba()` is invoked from `main.jsx` on idle so first solves don't block.
+3. **2×2 path.** Direct iterative-deepening A* (the state space is small enough that no pruning table is required).
+4. **Honest failure.** If the sticker counts don't validate, or the solver returns no solution, `solveCube` returns `{ moves: [], method: 'unsolved'|…, error: <kind> }`. The Solver screen renders a specific message per `error` kind ("Scan incomplete" / "Warming up" / "Could not solve") plus a Rescan CTA — never a fake CFOP demo presented as the user's actual solution.
 
 ## Color detection notes
 

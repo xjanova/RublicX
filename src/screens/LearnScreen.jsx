@@ -7,26 +7,52 @@ import { ArrowRight, CheckIcon, SparkIcon } from '../components/Icons.jsx';
 import { TUTORIAL_ALGS } from '../lib/solver.js';
 import { solvedCube, applyMoves, parseMoves, cloneCube } from '../lib/cube.js';
 import AnimatedCube from '../components/AnimatedCube.jsx';
+import { loadStats, recordAlgViewed, recordLessonOpened, subscribeStats } from '../lib/stats.js';
 
 export default function LearnScreen() {
   const { t, lang } = useI18n();
   const [size, setSize] = React.useState(3);
   const [openAlg, setOpenAlg] = React.useState(null);
+  const [stats, setStats] = React.useState(loadStats);
+  React.useEffect(() => subscribeStats(setStats), []);
+  const lessonProgress = stats.lessonProgress || {};
+
+  // Counts reflect what's actually in TUTORIAL_ALGS — no inflated claims.
+  const ollCount = Object.keys(TUTORIAL_ALGS).filter(k => k.startsWith('oll')).length;
+  const pllCount = Object.keys(TUTORIAL_ALGS).filter(k => k.startsWith('pll')).length;
+  const f2lCount = Object.keys(TUTORIAL_ALGS).filter(k => k.startsWith('f2l')).length;
 
   const sizes = [
-    { n: 2, label: t.cube2, level: t.beginner, count: 6 },
-    { n: 3, label: t.cube3, level: t.intermediate, count: 14 },
-    { n: 4, label: t.cube4, level: t.advanced, count: 9 },
+    { n: 2, label: t.cube2, level: t.beginner, count: 4 },
+    { n: 3, label: t.cube3, level: t.intermediate, count: 6 },
+    { n: 4, label: t.cube4, level: t.advanced, count: 3 },
   ];
 
   const lessons3 = [
-    { id: 'cross', title: t.whiteCross, sub: 'F2L · 01', dur: '6 ' + t.minutes, prog: 1, alg: TUTORIAL_ALGS.cross },
-    { id: 'f2l', title: t.f2lTitle, sub: 'F2L · 02', dur: '12 ' + t.minutes, prog: 0.7, alg: TUTORIAL_ALGS.f2l1 },
-    { id: 'oll', title: t.ollTitle, sub: 'OLL · 57 algs', dur: '24 ' + t.minutes, prog: 0.3, alg: TUTORIAL_ALGS.ollSune },
-    { id: 'pll', title: t.pllTitle, sub: 'PLL · 21 algs', dur: '18 ' + t.minutes, prog: 0, alg: TUTORIAL_ALGS.pllT },
-    { id: 'finger', title: t.fingerTricksTitle, sub: t.fingerTricks, dur: '8 ' + t.minutes, prog: 0, secret: true, alg: TUTORIAL_ALGS.ollAntiSune },
-    { id: 'champ', title: t.championAlgs, sub: t.secret, dur: '32 ' + t.minutes, prog: 0, secret: true, alg: TUTORIAL_ALGS.pllY },
+    { id: 'cross',  title: t.whiteCross,        sub: 'Cross',                  alg: TUTORIAL_ALGS.cross },
+    { id: 'f2l',    title: t.f2lTitle,          sub: `F2L · ${f2lCount} algs`, alg: TUTORIAL_ALGS.f2l1 },
+    { id: 'oll',    title: t.ollTitle,          sub: `OLL · ${ollCount} algs`, alg: TUTORIAL_ALGS.ollSune },
+    { id: 'pll',    title: t.pllTitle,          sub: `PLL · ${pllCount} algs`, alg: TUTORIAL_ALGS.pllT },
+    { id: 'finger', title: t.fingerTricksTitle, sub: t.fingerTricks,           alg: TUTORIAL_ALGS.ollAntiSune, secret: true },
+    { id: 'champ',  title: t.championAlgs,      sub: t.secret,                 alg: TUTORIAL_ALGS.pllY,        secret: true },
   ];
+
+  function handleLessonClick(lesson) {
+    setOpenAlg(openAlg === lesson.id ? null : lesson.id);
+    if (openAlg !== lesson.id) {
+      recordLessonOpened(lesson.id);
+      // Roll up progress at the size-tier level too so HomeScreen lesson rows reflect activity.
+      recordLessonOpened(`cube${size}`);
+      if (lesson.alg?.notation) recordAlgViewed(lesson.alg.notation);
+    }
+  }
+  function handleAlgClick(alg) {
+    setOpenAlg(openAlg === alg.notation ? null : alg.notation);
+    if (openAlg !== alg.notation) {
+      recordAlgViewed(alg.notation);
+      recordLessonOpened(`cube${size}`);
+    }
+  }
 
   // Algorithm gallery — grouped by phase. Each card opens to show the animated cube + alg
   // notation. Useful as a reference once the user has a feel for the basics.
@@ -110,56 +136,58 @@ export default function LearnScreen() {
         </div>
       </div>
 
-      {/* Chapter list */}
+      {/* Chapter list — progress is sourced from real lesson opens, not hardcoded */}
       <div style={{ padding: '20px 16px 0', display: 'flex', flexDirection: 'column', gap: 8 }}>
-        {lessons3.map((l, i) => (
-          <div key={l.id} style={{
-            background: T.card,
-            border: `1px solid ${T.border}`,
-            borderRadius: 18,
-            padding: '12px 14px',
-            cursor: 'pointer',
-            opacity: l.secret && l.prog === 0 ? 0.85 : 1,
-          }} onClick={() => setOpenAlg(openAlg === l.id ? null : l.id)}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{
-                width: 36, height: 36, borderRadius: 10,
-                background: l.prog === 1 ? `linear-gradient(135deg, ${T.accent2}, #00B894)` : T.cardHi,
-                border: l.prog === 1 ? 'none' : `1px solid ${T.border}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0,
-              }}>
-                {l.prog === 1 ? <CheckIcon /> : l.secret ? <SparkIcon color={T.warn} /> : (
-                  <span style={{ color: T.muted, fontSize: 12, fontWeight: 700 }}>{i + 1}</span>
-                )}
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ color: T.text, fontSize: 13, fontWeight: 700 }}>{l.title}</div>
-                  {l.secret && (
-                    <div style={{
-                      padding: '2px 6px', borderRadius: 6,
-                      background: 'rgba(255,182,39,0.15)',
-                      color: T.warn, fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
-                    }}>{t.pro}</div>
+        {lessons3.map((l, i) => {
+          const prog = lessonProgress[l.id] || 0;
+          const done = prog >= 1;
+          return (
+            <div key={l.id} style={{
+              background: T.card,
+              border: `1px solid ${T.border}`,
+              borderRadius: 18,
+              padding: '12px 14px',
+              cursor: 'pointer',
+              opacity: l.secret && prog === 0 ? 0.85 : 1,
+            }} onClick={() => handleLessonClick(l)}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: 10,
+                  background: done ? `linear-gradient(135deg, ${T.accent2}, #00B894)` : T.cardHi,
+                  border: done ? 'none' : `1px solid ${T.border}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  {done ? <CheckIcon /> : l.secret ? <SparkIcon color={T.warn} /> : (
+                    <span style={{ color: T.muted, fontSize: 12, fontWeight: 700 }}>{i + 1}</span>
                   )}
                 </div>
-                <div style={{ color: T.muted, fontSize: 10, marginTop: 1 }}>
-                  {l.sub} · {l.dur}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div style={{ color: T.text, fontSize: 13, fontWeight: 700 }}>{l.title}</div>
+                    {l.secret && (
+                      <div style={{
+                        padding: '2px 6px', borderRadius: 6,
+                        background: 'rgba(255,182,39,0.15)',
+                        color: T.warn, fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+                      }}>{t.pro}</div>
+                    )}
+                  </div>
+                  <div style={{ color: T.muted, fontSize: 10, marginTop: 1 }}>{l.sub}</div>
                 </div>
+                {prog > 0 && prog < 1 && (
+                  <div style={{ color: T.accent2, fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+                    {Math.round(prog * 100)}%
+                  </div>
+                )}
+                <ArrowRight color={T.dim} size={14} />
               </div>
-              {l.prog > 0 && l.prog < 1 && (
-                <div style={{ color: T.accent2, fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-                  {Math.round(l.prog * 100)}%
-                </div>
+              {openAlg === l.id && (
+                <AlgPreview alg={l.alg} />
               )}
-              <ArrowRight color={T.dim} size={14} />
             </div>
-            {openAlg === l.id && (
-              <AlgPreview alg={l.alg} />
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Algorithm galleries — F2L / OLL / PLL collections */}
@@ -177,7 +205,7 @@ export default function LearnScreen() {
             {g.algs.map((alg) => (
               <div
                 key={alg.notation}
-                onClick={() => setOpenAlg(openAlg === alg.notation ? null : alg.notation)}
+                onClick={() => handleAlgClick(alg)}
                 style={{
                   background: T.card, border: `1px solid ${T.border}`,
                   borderRadius: 14, padding: '10px 12px',

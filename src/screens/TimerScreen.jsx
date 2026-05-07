@@ -2,21 +2,21 @@ import React from 'react';
 import { T } from '../theme.js';
 import { useI18n } from '../i18n.jsx';
 import { scramble, scrambleString } from '../lib/cube.js';
+import { recordSolve, loadStats, recentSolves, subscribeStats } from '../lib/stats.js';
 
 export default function TimerScreen() {
   const { t, lang } = useI18n();
   const [state, setState] = React.useState('idle');
   const [time, setTime] = React.useState(0);
   const [held, setHeld] = React.useState(false);
-  const [history, setHistory] = React.useState(() => {
-    const raw = localStorage.getItem('rublicx.history');
-    if (raw) try { return JSON.parse(raw); } catch {}
-    return [18.2, 16.4, 17.1, 14.8, 15.2, 13.6, 14.3, 16.0, 13.8, 12.4, 14.7, 11.84];
-  });
+  const [stats, setStats] = React.useState(loadStats);
+  const history = React.useMemo(() => recentSolves(stats, 12).map(s => s.time), [stats]);
   const [scrambleStr, setScrambleStr] = React.useState(() => scrambleString(scramble(3, 20)));
   const intervalRef = React.useRef(null);
   const startRef = React.useRef(null);
   const holdTimerRef = React.useRef(null);
+
+  React.useEffect(() => subscribeStats(setStats), []);
 
   React.useEffect(() => {
     if (state === 'running') {
@@ -30,17 +30,13 @@ export default function TimerScreen() {
     return () => clearInterval(intervalRef.current);
   }, [state]);
 
-  React.useEffect(() => {
-    localStorage.setItem('rublicx.history', JSON.stringify(history));
-  }, [history]);
-
   const onPress = (e) => {
     e.preventDefault();
     if (state === 'running') {
       const finalTime = (performance.now() - startRef.current) / 1000;
       setTime(finalTime);
       setState('done');
-      setHistory(h => [...h.slice(-11), parseFloat(finalTime.toFixed(2))]);
+      recordSolve(parseFloat(finalTime.toFixed(2)), scrambleStr);
       setScrambleStr(scrambleString(scramble(3, 20)));
     } else if (state === 'idle' || state === 'done') {
       setHeld(true);
@@ -60,10 +56,15 @@ export default function TimerScreen() {
   };
 
   const color = state === 'ready' ? T.accent2 : state === 'done' ? T.accent2 : T.text;
-  const best = history.length ? Math.min(...history) : 0;
-  const avg = (slice) => slice.length ? (slice.reduce((a, b) => a + b, 0) / slice.length).toFixed(2) : '—';
-  const avg5 = avg(history.slice(-5));
-  const avg12 = avg(history.slice(-12));
+  const best = history.length ? Math.min(...history) : null;
+  const fmt = (n, d = 2) => (n == null || !isFinite(n)) ? '—' : n.toFixed(d);
+  // Avg-of-N is only meaningful with N samples; show em-dash until then.
+  const avgOf = (slice, n) => {
+    if (slice.length < n) return '—';
+    return (slice.reduce((a, b) => a + b, 0) / slice.length).toFixed(2);
+  };
+  const avg5 = avgOf(history.slice(-5), 5);
+  const avg12 = avgOf(history.slice(-12), 12);
 
   return (
     <div className="scrollable" style={{ paddingTop: 56, paddingBottom: 130, background: T.bg, minHeight: '100%', position: 'relative', overflowY: 'auto', height: '100%' }}>
@@ -139,7 +140,7 @@ export default function TimerScreen() {
       </div>
 
       <div style={{ padding: '14px 16px 0', display: 'flex', gap: 8 }}>
-        <Stat label={t.bestEver} value={best.toFixed(2)} highlight />
+        <Stat label={t.bestEver} value={fmt(best)} highlight />
         <Stat label={t.avg5} value={avg5} />
         <Stat label={t.avg12} value={avg12} />
       </div>
@@ -153,9 +154,15 @@ export default function TimerScreen() {
             <div style={{ color: T.muted, fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase' }}>
               {t.last12}
             </div>
-            <div style={{ color: T.text, fontSize: 11, fontWeight: 700 }}>{t.seeAll}</div>
+            <div style={{ color: T.text, fontSize: 11, fontWeight: 700 }}>{history.length} / 12</div>
           </div>
-          <Sparkline data={history.slice(-12)} />
+          {history.length === 0 ? (
+            <div style={{ color: T.dim, fontSize: 12, padding: '20px 0', textAlign: 'center' }}>
+              {lang === 'th' ? 'จับเวลาครั้งแรกเพื่อเริ่มกราฟ' : 'Time your first solve to start the chart'}
+            </div>
+          ) : (
+            <Sparkline data={history.slice(-12)} />
+          )}
         </div>
       </div>
     </div>

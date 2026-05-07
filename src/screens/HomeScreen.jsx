@@ -7,11 +7,23 @@ import {
   ArrowRight, FlameIcon, ScanIcon, SparkIcon, LockIcon,
 } from '../components/Icons.jsx';
 import { parseMoves } from '../lib/cube.js';
+import { loadStats, bestTime, totalSolves, currentStreak, subscribeStats } from '../lib/stats.js';
 
 const DEMO_SEQUENCE = parseMoves("R U F' L U' R'");
 
+function fmtTime(t) {
+  if (t == null || !isFinite(t)) return '—';
+  return t.toFixed(1) + 's';
+}
+
 export default function HomeScreen({ onNavigate }) {
   const { t, lang } = useI18n();
+  const [stats, setStats] = React.useState(loadStats);
+  React.useEffect(() => subscribeStats(setStats), []);
+  const best = bestTime(stats);
+  const solves = totalSolves(stats);
+  const streak = currentStreak(stats);
+  const lessonProgress = stats.lessonProgress || {};
   return (
     <div className="scrollable" style={{
       paddingTop: 56, paddingBottom: 130,
@@ -49,7 +61,7 @@ export default function HomeScreen({ onNavigate }) {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             color: '#fff', fontWeight: 700, fontSize: 16,
             boxShadow: '0 4px 12px rgba(124,92,255,0.4)',
-          }}>{lang === 'th' ? 'นน' : 'NK'}</div>
+          }}>🧊</div>
         </div>
       </div>
 
@@ -69,15 +81,26 @@ export default function HomeScreen({ onNavigate }) {
           }} />
           <div style={{ display: 'flex', justifyContent: 'space-between', position: 'relative' }}>
             <div style={{ flex: 1, paddingTop: 4 }}>
-              <div style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '4px 10px', borderRadius: 12,
-                background: 'rgba(255,182,39,0.14)',
-                color: T.warn, fontSize: 11, fontWeight: 700, letterSpacing: 0.4,
-              }}>
-                <FlameIcon size={12} color={T.warn} />
-                {t.streak3}
-              </div>
+              {streak > 0 ? (
+                <div style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 10px', borderRadius: 12,
+                  background: 'rgba(255,182,39,0.14)',
+                  color: T.warn, fontSize: 11, fontWeight: 700, letterSpacing: 0.4,
+                }}>
+                  <FlameIcon size={12} color={T.warn} />
+                  {streak} {t.days} · {lang === 'th' ? 'สตรีค' : 'streak'}
+                </div>
+              ) : (
+                <div style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '4px 10px', borderRadius: 12,
+                  background: 'rgba(255,255,255,0.06)',
+                  color: T.muted, fontSize: 11, fontWeight: 700, letterSpacing: 0.4,
+                }}>
+                  {lang === 'th' ? 'เริ่มเรียนวันนี้' : 'Start today'}
+                </div>
+              )}
               <div style={{ color: T.text, fontSize: 22, fontWeight: 700, marginTop: 12, lineHeight: 1.15 }}>
                 {t.todayLesson}
               </div>
@@ -134,12 +157,12 @@ export default function HomeScreen({ onNavigate }) {
         />
       </div>
 
-      {/* Stats row */}
+      {/* Stats row — sourced from real localStorage stats */}
       <div style={{ padding: '20px 16px 0', position: 'relative', zIndex: 1 }}>
         <div style={{ display: 'flex', gap: 8 }}>
-          <StatTile label={t.solved} value="247" />
-          <StatTile label={t.bestTime} value="14.3s" highlight />
-          <StatTile label={t.streak} value={`12 ${t.days}`} />
+          <StatTile label={t.solved} value={solves.toString()} />
+          <StatTile label={t.bestTime} value={fmtTime(best)} highlight />
+          <StatTile label={t.streak} value={`${streak} ${t.days}`} />
         </div>
       </div>
 
@@ -154,10 +177,14 @@ export default function HomeScreen({ onNavigate }) {
         </div>
       </div>
       <div style={{ padding: '0 16px', display: 'flex', flexDirection: 'column', gap: 10, position: 'relative', zIndex: 1 }}>
-        <LessonRow n={2} title={t.cube2} subtitle={`${t.beginner} · 6 ${t.chapter}`} progress={0.65} onClick={() => onNavigate?.('learn')} />
-        <LessonRow n={3} title={t.cube3} subtitle={`${t.intermediate} · 14 ${t.chapter}`} progress={0.42} active onClick={() => onNavigate?.('learn')} />
-        <LessonRow n={4} title={t.cube4} subtitle={`${t.advanced} · 9 ${t.chapter}`} progress={0.12} onClick={() => onNavigate?.('learn')} />
-        <LessonRow n={3} title={t.secret} subtitle={`${t.oll} · ${t.pll}`} progress={0} locked />
+        <LessonRow n={2} title={t.cube2} subtitle={`${t.beginner} · 4 ${t.chapter}`}
+          progress={lessonProgress['cube2'] || 0} onClick={() => onNavigate?.('learn')} />
+        <LessonRow n={3} title={t.cube3} subtitle={`${t.intermediate} · 6 ${t.chapter}`}
+          progress={lessonProgress['cube3'] || 0} active onClick={() => onNavigate?.('learn')} />
+        <LessonRow n={4} title={t.cube4} subtitle={`${t.advanced} · 3 ${t.chapter}`}
+          progress={lessonProgress['cube4'] || 0} onClick={() => onNavigate?.('learn')} />
+        <LessonRow n={3} title={t.secret} subtitle={`${t.oll} · ${t.pll}`}
+          progress={lessonProgress['secret'] || 0} locked={!(lessonProgress['cube3'] >= 1)} />
       </div>
     </div>
   );

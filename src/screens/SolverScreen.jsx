@@ -3,8 +3,9 @@ import { T } from '../theme.js';
 import { useI18n } from '../i18n.jsx';
 import AnimatedCube from '../components/AnimatedCube.jsx';
 import { PlayIcon, PauseIcon, PrevIcon, NextIcon, SparkIcon } from '../components/Icons.jsx';
-import { solveCube, buildMethodWalkthrough } from '../lib/solver.js';
-import { solvedCube, applyMoves, cloneCube, fromFaceGrids, parseMoves } from '../lib/cube.js';
+import { solveCube, buildMethodWalkthrough, warmupKociemba, isKociembaReady } from '../lib/solver.js';
+import { solvedCube, applyMoves, cloneCube, fromFaceGrids, parseMoves, validateCubeState } from '../lib/cube.js';
+import { recordScrambleSolveCompleted } from '../lib/stats.js';
 
 const METHOD_WALKTHROUGH = buildMethodWalkthrough();
 
@@ -14,6 +15,16 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
   const [speed, setSpeed] = React.useState(1);
   const [mode, setMode] = React.useState('fastest');
   const [moveIdx, setMoveIdx] = React.useState(0);
+  const [solverReady, setSolverReady] = React.useState(isKociembaReady());
+
+  // Poll for solver readiness if not ready yet (cheap; only while screen is open and not yet ready).
+  React.useEffect(() => {
+    if (solverReady) return;
+    let cancelled = false;
+    warmupKociemba().then(() => { if (!cancelled) setSolverReady(true); });
+    const id = setInterval(() => { if (isKociembaReady()) { setSolverReady(true); clearInterval(id); } }, 250);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [solverReady]);
 
   // Resolve the input cube state.
   const initialCube = React.useMemo(() => {
@@ -24,33 +35,62 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
     return c;
   }, [scanResult]);
 
-  // Compute solution. Method-based mode always shows the pre-canned educational sequence
-  // (CFOP triggers + Sune + T-perm) regardless of input — useful for teaching alongside the
-  // user's actual cube. Fastest mode invokes the on-device solver and surfaces an unsolved
-  // state cleanly when the IDA* depth budget is exceeded.
-  const { sequence, methodName, unsolved, phases } = React.useMemo(() => {
+  const stickerCountsValid = React.useMemo(() => validateCubeState(initialCube), [initialCube]);
+
+  // Compute solution. Method-based mode shows a generic CFOP walkthrough labeled clearly as
+  // a demo. Fastest mode runs Kociemba on the actual cube state — if that fails (invalid scan,
+  // solver still warming up, or 4×4+ where we don't yet have a real solver) we show an honest
+  // empty-state instead of a fake sequence.
+  const { sequence, methodName, statusKind, phases, isMethodDemo } = React.useMemo(() => {
     if (mode === 'method') {
       return {
         sequence: METHOD_WALKTHROUGH.moves,
         phases: METHOD_WALKTHROUGH.phases,
         methodName: 'CFOP',
-        unsolved: false,
+        statusKind: 'method_demo',
+        isMethodDemo: true,
       };
+    }
+    if (initialCube.n !== 3 && initialCube.n !== 2) {
+      return { sequence: [], phases: null, methodName: 'unsupported', statusKind: 'unsupported_size' };
+    }
+    if (initialCube.n === 3 && !stickerCountsValid && scanResult) {
+      return { sequence: [], phases: null, methodName: 'invalid_scan', statusKind: 'invalid_scan' };
+    }
+    if (initialCube.n === 3 && !solverReady) {
+      return { sequence: [], phases: null, methodName: 'warming_up', statusKind: 'warming_up' };
     }
     const result = solveCube(cloneCube(initialCube), {
       mode,
       history: scrambleHistory && !scanResult ? scrambleHistory : null,
     });
-    if (result.moves.length === 0) {
-      return {
-        sequence: METHOD_WALKTHROUGH.moves,
-        phases: METHOD_WALKTHROUGH.phases,
-        methodName: result.method,
-        unsolved: true,
-      };
+    // 0 moves with method 'Kociemba' or 'Kociemba-equiv' means the cube is already solved — that's success.
+    if ((!result.moves || result.moves.length === 0)
+        && (result.method === 'Kociemba' || result.method === 'Kociemba-equiv') && result.exact) {
+      return { sequence: [], phases: null, methodName: result.method, statusKind: 'already_solved' };
     }
-    return { sequence: result.moves, phases: null, methodName: result.method, unsolved: false };
-  }, [initialCube, mode, scrambleHistory, scanResult]);
+    if (!result.moves || result.moves.length === 0) {
+      // Solver couldn't produce moves — surface honestly.
+      const kind = result.error === 'solver_initializing' ? 'warming_up'
+                 : result.error === 'big_cube_solver_pending' ? 'unsupported_size'
+                 : 'cannot_solve';
+      return { sequence: [], phases: null, methodName: result.method, statusKind: kind };
+    }
+    return { sequence: result.moves, phases: null, methodName: result.method, statusKind: 'ok' };
+  }, [initialCube, mode, scrambleHistory, scanResult, solverReady, stickerCountsValid]);
+
+  // Credit the user once per successful solver run (only fastest mode, only when we actually solved).
+  const creditedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (statusKind === 'ok' && !creditedRef.current && (scanResult || scrambleHistory)) {
+      creditedRef.current = true;
+      try { recordScrambleSolveCompleted(); } catch {}
+    }
+  }, [statusKind, scanResult, scrambleHistory]);
+
+  // already_solved is a success state too (no error UI, but no playback either).
+  const unsolved = statusKind !== 'ok' && statusKind !== 'method_demo' && statusKind !== 'already_solved';
+  const noSequence = sequence.length === 0;
 
   const currentPhase = React.useMemo(() => {
     if (!phases) return null;
@@ -75,7 +115,19 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
             {t.solution}
           </div>
           <div style={{ color: T.text, fontSize: 26, fontWeight: 700, marginTop: 2 }}>
-            {unsolved ? (lang === 'th' ? 'ตัวอย่าง CFOP' : 'CFOP demo') : t.solved2}
+            {statusKind === 'method_demo'
+              ? (lang === 'th' ? 'สูตร CFOP สาธิต' : 'CFOP walkthrough')
+              : statusKind === 'warming_up'
+              ? (lang === 'th' ? 'กำลังเตรียมตัวแก้…' : 'Warming up solver…')
+              : statusKind === 'invalid_scan'
+              ? (lang === 'th' ? 'สแกนไม่ครบ' : 'Scan incomplete')
+              : statusKind === 'unsupported_size'
+              ? (lang === 'th' ? 'ยังไม่รองรับขนาดนี้' : 'Size not yet supported')
+              : statusKind === 'cannot_solve'
+              ? (lang === 'th' ? 'ไม่สามารถแก้ได้' : 'Could not solve')
+              : statusKind === 'already_solved'
+              ? (lang === 'th' ? 'ลูกแก้แล้ว 🎉' : 'Already solved 🎉')
+              : t.solved2}
           </div>
         </div>
         <div style={{
@@ -85,24 +137,91 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
           display: 'flex', alignItems: 'center', gap: 5,
         }}>
           <SparkIcon size={12} color={unsolved ? T.warn : T.accent2} />
-          {unsolved ? (lang === 'th' ? 'ลึกเกิน' : 'too deep') : t.optimal}
+          {statusKind === 'ok'
+            ? (methodName === 'Kociemba' ? 'Kociemba ≤22' : t.optimal)
+            : statusKind === 'method_demo'
+            ? (lang === 'th' ? 'สาธิต' : 'demo')
+            : statusKind === 'warming_up'
+            ? (lang === 'th' ? 'รอสักครู่' : 'please wait')
+            : (lang === 'th' ? 'ตรวจสอบใหม่' : 'check input')}
         </div>
       </div>
 
-      {unsolved && (
+      {statusKind === 'method_demo' && !scanResult && !scrambleHistory && (
         <div style={{ padding: '12px 16px 0' }}>
           <div style={{
-            background: 'rgba(255,182,39,0.10)',
-            border: '1px solid rgba(255,182,39,0.35)',
-            borderRadius: 14,
-            padding: '12px 14px',
-            display: 'flex', alignItems: 'center', gap: 12,
+            background: 'rgba(124,92,255,0.10)', border: '1px solid rgba(124,92,255,0.35)',
+            borderRadius: 14, padding: '10px 14px', display: 'flex', gap: 10,
+          }}>
+            <div style={{ fontSize: 18 }}>📘</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? 'นี่คือลำดับสาธิต CFOP ทั่วไป — ไม่ใช่การแก้ลูกของคุณ ไปแท็บสแกนเพื่อให้แก้ลูกจริง'
+                : 'Generic CFOP walkthrough — not solving your specific cube. Use the Scan tab for a real solve.'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusKind === 'warming_up' && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(124,92,255,0.10)', border: '1px solid rgba(124,92,255,0.35)',
+            borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center',
+          }}>
+            <div style={{ fontSize: 22 }}>⏳</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? 'กำลังสร้างตาราง pruning สำหรับ Kociemba (≈1–5 วินาที ครั้งแรก) จากนั้นแก้ลูกจริงในหลักมิลลิวินาที'
+                : 'Building Kociemba pruning tables (~1–5 s, first time only). After that, real solves run in milliseconds.'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusKind === 'invalid_scan' && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(255,80,80,0.10)', border: '1px solid rgba(255,80,80,0.35)',
+            borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center',
           }}>
             <div style={{ fontSize: 22 }}>⚠️</div>
             <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
               {lang === 'th'
-                ? 'ตัวแก้บนเครื่องหา solution ภายใน 4.5 วิ ไม่เจอ — สแกนใหม่ด้วยการสับลูกที่น้อยลง หรือเรียนสูตรจากแท็บ Method'
-                : 'On-device solver couldn\'t find a solution within 4.5s. Try rescanning with a less scrambled cube, or learn the algorithms in the Method tab.'}
+                ? 'สีบางหน้าไม่ครบ 9 ช่อง — น่าจะเป็นข้อผิดพลาดจากการสแกน กรุณาสแกนใหม่ในแสงที่สม่ำเสมอ'
+                : 'Sticker counts are off — likely a scan error. Try rescanning under more even lighting.'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusKind === 'cannot_solve' && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(255,182,39,0.10)', border: '1px solid rgba(255,182,39,0.35)',
+            borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center',
+          }}>
+            <div style={{ fontSize: 22 }}>🤔</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? 'ตัวแก้คืนค่าว่างเปล่า — มักหมายถึงสีของลูกอ่านผิด (เช่น ส้มกับแดงสลับ) สแกนใหม่ดูครับ'
+                : 'Solver returned no moves — usually means colors were misread (e.g., red↔orange swap). Try rescanning.'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusKind === 'unsupported_size' && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(255,182,39,0.10)', border: '1px solid rgba(255,182,39,0.35)',
+            borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center',
+          }}>
+            <div style={{ fontSize: 22 }}>🚧</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? 'ตอนนี้ตัวแก้รองรับเฉพาะ 2×2 และ 3×3 — 4×4 / 5×5 อยู่ระหว่างพัฒนา'
+                : 'Solver currently supports 2×2 and 3×3 only — 4×4 / 5×5 are in progress.'}
             </div>
           </div>
         </div>
@@ -162,7 +281,7 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
         </div>
       )}
 
-      {/* 3D cube viewer */}
+      {/* 3D cube viewer (always shown — even when there's no sequence, the user sees their cube) */}
       <div style={{
         margin: '20px auto 0',
         width: 300, height: 300,
@@ -180,13 +299,14 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
           initialCube={initialCube}
           sequence={sequence}
           speed={speed}
-          playing={playing}
+          playing={playing && !noSequence}
           rotation={{ x: -0.45, y: -0.55 }}
           onMoveChange={setMoveIdx}
         />
       </div>
 
-      {/* Move strip */}
+      {/* Move strip + playback only render when there's an actual sequence */}
+      {!noSequence && (<>
       <div style={{ padding: '8px 16px 0', position: 'relative' }}>
         <div className="scrollable" style={{
           display: 'flex', gap: 6, overflowX: 'auto',
@@ -281,6 +401,17 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
           </div>
         </div>
       </div>
+      </>)}
+
+      {noSequence && unsolved && (
+        <div style={{ padding: '20px 16px 0' }}>
+          <button onClick={() => onNavigate?.('scan')} style={{
+            width: '100%', padding: '14px 16px', borderRadius: 16,
+            background: T.cardHi, border: `1px solid ${T.border}`,
+            color: T.text, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+          }}>{lang === 'th' ? 'สแกนใหม่' : 'Rescan cube'}</button>
+        </div>
+      )}
     </div>
   );
 }
