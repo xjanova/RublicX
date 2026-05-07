@@ -73,6 +73,7 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
       // Solver couldn't produce moves — surface honestly.
       const kind = result.error === 'solver_initializing' ? 'warming_up'
                  : result.error === 'big_cube_solver_pending' ? 'unsupported_size'
+                 : result.error === 'scramble_too_deep_4x4' ? 'too_deep_4x4'
                  : 'cannot_solve';
       return { sequence: [], phases: null, methodName: result.method, statusKind: kind };
     }
@@ -220,8 +221,24 @@ export default function SolverScreen({ scanResult, scrambleHistory, onNavigate }
             <div style={{ fontSize: 22 }}>🚧</div>
             <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
               {lang === 'th'
-                ? 'ตอนนี้ตัวแก้รองรับเฉพาะ 2×2 และ 3×3 — 4×4 / 5×5 อยู่ระหว่างพัฒนา'
-                : 'Solver currently supports 2×2 and 3×3 only — 4×4 / 5×5 are in progress.'}
+                ? 'ตอนนี้รองรับ 2×2 และ 3×3 (เต็มทุก state) และ 4×4 (ใน 10 ท่าจาก solved). 5×5 ยังพัฒนาอยู่'
+                : 'Solver supports 2×2 and 3×3 (any state) and 4×4 (within 10 moves of solved). 5×5 is in progress.'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {statusKind === 'too_deep_4x4' && (
+        <div style={{ padding: '12px 16px 0' }}>
+          <div style={{
+            background: 'rgba(255,182,39,0.10)', border: '1px solid rgba(255,182,39,0.35)',
+            borderRadius: 14, padding: '12px 14px', display: 'flex', gap: 12, alignItems: 'center',
+          }}>
+            <div style={{ fontSize: 22 }}>📐</div>
+            <div style={{ flex: 1, color: T.text, fontSize: 12, lineHeight: 1.4 }}>
+              {lang === 'th'
+                ? '4×4 ของคุณสับลึกเกินกว่าที่ตัวแก้รุ่นนี้รองรับ (~10 ท่าจาก solved). full reduction solver กำลังพัฒนาในเวอร์ชั่นถัดไป'
+                : 'Your 4×4 is scrambled deeper than this solver supports (~10 moves from solved). Full reduction solver is in development for the next version.'}
             </div>
           </div>
         </div>

@@ -15,6 +15,7 @@ import {
 } from './cube.js';
 import { optimizeMoves } from './solver-shared.js';
 import { kociembaSolveSync, isKociembaReady, warmupKociemba } from './kociemba.js';
+import { solve4x4 } from './cube4x4.js';
 
 export { optimizeMoves, warmupKociemba, isKociembaReady };
 
@@ -127,7 +128,28 @@ export function solveCube(cube, options = {}) {
     return { moves: [], method: 'unsolved', exact: false, error: 'depth_exceeded' };
   }
 
-  // 4×4 / 5×5: we don't yet have a real solver. Tell the UI honestly.
+  if (cube.n === 4) {
+    // Bidirectional BFS — solves cubes within ~10 moves of solved. For deeper random-state
+    // scrambles, returns null and we surface that honestly to the UI. NOT a full reduction
+    // solver; full random-state 4×4 solving is on the roadmap.
+    if (history && history.length) {
+      // App-scrambled path is already handled at the top of this function via inverse.
+    }
+    const moves4 = solve4x4(cube, { maxTotalDepth: 10, budgetMs: 15000 });
+    if (moves4 && moves4.length > 0) {
+      const verify = cloneCube(cube);
+      applyMoves(verify, moves4);
+      if (isSolved(verify)) {
+        return { moves: optimizeMoves(moves4), method: 'BFS-4x4', exact: false };
+      }
+    }
+    if (moves4 && moves4.length === 0) {
+      return { moves: [], method: 'BFS-4x4', exact: true }; // already solved
+    }
+    return { moves: [], method: 'unsolved', exact: false, error: 'scramble_too_deep_4x4' };
+  }
+
+  // 5×5: not yet supported.
   return { moves: [], method: 'not_supported', exact: false, error: 'big_cube_solver_pending' };
 }
 

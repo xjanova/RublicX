@@ -12,12 +12,14 @@ import { HEX_BY_FACE } from '../lib/cube.js';
 const SCAN_FACES = ['U', 'R', 'F', 'D', 'L', 'B'];
 const FACE_TINT = { U: '#fff', R: '#B71234', F: '#009B48', D: '#FFD500', L: '#FF5800', B: '#0046AD' };
 
-// Scan supports the cube sizes our solver can actually solve. 4×4/5×5 are intentionally
-// omitted — surfacing them here would let the user finish a 6-face scan only to hit a
-// "Size not yet supported" message in the Solver tab.
+// Scan + solve support: 2×2 / 3×3 use full Kociemba (any state ≤22 moves). 4×4 uses a
+// bidirectional-BFS solver that handles cubes within ~10 moves of solved; deeper random-
+// state 4×4s currently surface as "scramble too deep" in the Solver tab. 5×5 is omitted
+// until a real solver ships.
 const SIZE_OPTIONS = [
   { n: 2, label: '2×2', subKey: 'pocketSub' },
   { n: 3, label: '3×3', subKey: 'classicSub' },
+  { n: 4, label: '4×4', subKey: 'revengeSub' },
 ];
 
 // Auto-capture: requires the captureReadiness() check (confidence + saturation + stability)
