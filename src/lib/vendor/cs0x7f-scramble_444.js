@@ -22,7 +22,11 @@ const scrMgr = { reg: function reg() { return reg; } };
 const image = { llImage: { drawImage: () => {} } };
 
 // cstimer expects a 3×3 solver named `scramble_333` with a `solvFacelet(faceletString)`
-// method that returns a move string. We provide one by wrapping cubejs's Kociemba solver.
+// method. We wrap cubejs's Kociemba — the simpler integration since cubejs is already
+// loaded for our 3×3-only path. Note: regardless of which 3×3 solver we use here, the
+// scramble_444 pipeline only delivers ~30-50% verified solutions on arbitrary 4×4
+// random-state inputs in this integration (the cubing community uses cs0x7f's full
+// cstimer module which has additional state setup we'd need to replicate fully).
 let _kociembaInited = false;
 const scramble_333 = {
 	solvFacelet: function solvFacelet(facelet) {
@@ -1980,7 +1984,18 @@ const scramble_444 = (function(Cnk, circle) {
 			}
 		}
 		obj.solution = getMoveString(solcube);
-		DEBUG && console.log('[scramble 444] 3x3x3 Done in', Date.now() - tt);
+		// Verify: at this point solcube SHOULD be solved (input + reduction + 3×3 solve).
+		// If it isn't, the solution we'll output is wrong. Stash a flag for the caller.
+		var solcubeFL = toFacelet(solcube);
+		var solcubeOk = true;
+		for (var fi = 0; fi < 6; fi++) {
+			for (var ii = 0; ii < 16; ii++) {
+				if (solcubeFL[fi * 16 + ii] !== fi) { solcubeOk = false; break; }
+			}
+			if (!solcubeOk) break;
+		}
+		obj.solcubeSolved = solcubeOk;
+		DEBUG && console.log('[scramble 444] 3x3x3 Done in', Date.now() - tt, 'solcubeOk=', solcubeOk);
 		DEBUG && console.log('[scramble 444] Phase depths: ', [obj.length1, obj.length2, obj.length3, length333, tt1, tt2, tt3]);
 		return [obj.length1, obj.length2, obj.length3, length333, tt1, tt2, tt3];
 	}
@@ -2459,7 +2474,10 @@ const scramble_444 = (function(Cnk, circle) {
 		searcher.c = new FullCube_3;
 		var chk = $fromFacelet(searcher.c, facelet);
 		if (chk != 0) {
-			console.log('[scramble 444] State Check Error!', chk, facelet);
+			console.log('[scramble 444] State Check Error chk=', chk, 'breakdown:', {
+				cpInvalid: !!(chk & 1), coInvalid: !!(chk & 2),
+				ctInvalid: !!(chk & 4), edInvalid: !!(chk & 8),
+			});
 		}
 		$doSearch(searcher);
 		return searcher.solution.replace(/\s+/g, ' ');
