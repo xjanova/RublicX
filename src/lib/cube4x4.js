@@ -1,20 +1,29 @@
 // 4×4 solver — primary path uses cs0x7f's TPR (Three-Phase Reduction) algorithm vendored
 // from cstimer (the de-facto reference 4×4 solver in the cubing community), with our
-// previous bidirectional-BFS as a verifying fallback.
+// bidirectional-BFS as a fallback for cases the TPR misses.
 //
-// Why this combination:
-//   • cs0x7f's TPR handles arbitrary random-state 4×4s in ~50 moves and a few hundred ms
-//     once its pruning tables are built.
-//   • The output of `genFacelet` is the SCRAMBLE (moves taking solved → state). To use it
-//     as a SOLUTION (state → solved) we INVERT the move list — reverse + flip CW/CCW.
-//   • The inverted output occasionally fails to solve (an edge case where cs0x7f's solver
-//     finds a different equivalent scramble), so we VERIFY before returning. If the
-//     verification fails, we fall back to our bidirectional BFS which handles shallow
-//     scrambles up to ~6 moves cleanly.
-//   • Memory caps on the BFS prevent browser-tab OOM on deep scrambles where neither
-//     path finds a verified solution; in that case we return null and the UI surfaces it.
+// How the path works:
+//   1. cs0x7f's `genFaceletWithStatus` runs the full TPR pipeline: 3 phases of reduction
+//      (centers → centers+edge axis → full reduction) then a 3×3 finishing solve via
+//      vendored min2phase Kociemba. It exposes the raw moveBuffer (the moves cs0x7f
+//      applied internally to take INPUT → SOLVED state) and the post-solve facelet.
+//   2. The internal `getMoveString` reverses+conjugates the moveBuffer to produce a
+//      "scramble" (moves taking SOLVED → INPUT). Inverting that scramble would normally
+//      give us a solution.
+//   3. **The catch**: cs0x7f's pipeline frequently leaves the cube in a *solved-up-to-
+//      cube-rotation* state at the end (because the embedded 3×3 Kociemba solver treats
+//      any color-uniform face-state as solved, regardless of which color is on which face).
+//      The internal symmetry-conjugation in getMoveString is supposed to compensate, but
+//      it's buggy for arbitrary inputs with permuted centers. Result: ~50-90% of
+//      cs0x7f-output solutions fail verification.
+//   4. **The fix**: we use the raw moveBuffer directly. The moveBuffer takes INPUT → P
+//      where P is "solved up to a cube rotation R" (verified empirically against the
+//      exposed `postSolveFL`). Then `solution = moveBuffer + R⁻¹` correctly takes
+//      INPUT → SOLVED. We compute R from the postSolveFL by checking which of the 24
+//      cube-rotation states matches.
+//   5. BFS fallback covers any pathological case the TPR can't handle.
 
-import { applyMove, cloneCube, isSolved, parseMoves } from './cube.js';
+import { applyMove, applyMoves, cloneCube, isSolved, parseMoves } from './cube.js';
 import scramble_444 from './vendor/cs0x7f-scramble_444.js';
 
 const FACELET = ['U', 'R', 'F', 'D', 'L', 'B'];
@@ -31,17 +40,6 @@ function cubeToFacelet96(cube) {
   return s;
 }
 
-// Reverse + flip-direction each move. cs0x7f's `genFacelet` returns the scramble (moves
-// taking SOLVED to the input state); to use it as a solution we invert.
-function invertSolution(s) {
-  const tokens = s.trim().split(/\s+/).filter(Boolean);
-  return tokens.reverse().map((m) => {
-    if (m.endsWith("'")) return m.slice(0, -1);
-    if (m.endsWith('2')) return m;
-    return m + "'";
-  }).join(' ');
-}
-
 let _cs0x7fInited = false;
 function ensureCs0x7fInit() {
   if (_cs0x7fInited) return;
@@ -49,24 +47,138 @@ function ensureCs0x7fInit() {
   _cs0x7fInited = true;
 }
 
-// Try cs0x7f's TPR solver. Verifies the produced solution actually solves the input;
-// returns null if not (caller falls back to BFS).
+// Cube rotations on a 4×4 expressed as wide-move sequences. Each rotation moves every
+// layer together. On a 4×4 a single wide move (e.g. Rw) only rotates 2 of the 4 layers,
+// so we use TWO opposite wide moves to rotate the entire cube:
+//   x  = Rw Lw'  (top-half wide + bottom-half wide-inverse, rotating all 4 layers around R-axis)
+//   y  = Uw Dw'
+//   z  = Fw Bw'
+const ROT_PRIMITIVES = {
+  'x':  "Rw Lw'",
+  "x'": "Rw' Lw",
+  'x2': 'Rw2 Lw2',
+  'y':  "Uw Dw'",
+  "y'": "Uw' Dw",
+  'y2': 'Uw2 Dw2',
+  'z':  "Fw Bw'",
+  "z'": "Fw' Bw",
+  'z2': 'Fw2 Bw2',
+};
+
+function expandRotationsToMoves(seq) {
+  if (!seq) return [];
+  const tokens = seq.trim().split(/\s+/).filter(Boolean);
+  const expanded = [];
+  for (const t of tokens) {
+    const wide = ROT_PRIMITIVES[t];
+    if (wide) expanded.push(wide); else expanded.push(t);
+  }
+  return parseMoves(expanded.join(' '));
+}
+
+// Build the 24 unique cube-rotation states. For each rotation sequence, the resulting
+// face-color permutation on a solved cube is its fingerprint; duplicate fingerprints
+// (e.g. y vs xyz') collapse to one canonical sequence (we keep the SHORTEST).
+function buildRotationCatalog() {
+  const xs = ['', 'x', 'x2', "x'"];
+  const ys = ['', 'y', 'y2', "y'"];
+  const zs = ['', 'z', 'z2', "z'"];
+  const seen = new Map();
+  for (const x of xs) for (const y of ys) for (const z of zs) {
+    const seq = [x, y, z].filter(Boolean).join(' ');
+    const fp = solvedAfterRotSeq(seq);
+    if (!seen.has(fp) || seen.get(fp).length > seq.length) seen.set(fp, seq);
+  }
+  const out = [];
+  for (const [fp, seq] of seen) out.push({ fingerprint: fp, seq });
+  return out;
+}
+
+// Return a fingerprint string of a solved 4×4 after applying rotation sequence `seq`.
+// Encoding: 96 chars where each char is the face-index (0..5) cast directly to a char
+// code via String.fromCharCode. Match against any 96-element int array using the same
+// encoding so equality is a single string compare.
+function solvedAfterRotSeq(seq) {
+  const c = { n: 4, faces: [] };
+  for (let f = 0; f < 6; f++) {
+    const face = new Array(16);
+    for (let i = 0; i < 16; i++) face[i] = f;
+    c.faces.push(face);
+  }
+  if (seq) applyMoves(c, expandRotationsToMoves(seq));
+  let s = '';
+  for (let f = 0; f < 6; f++) for (let i = 0; i < 16; i++) s += String.fromCharCode(c.faces[f][i]);
+  return s;
+}
+
+const ROTATION_CATALOG = buildRotationCatalog();
+
+// Find which cube rotation R takes solved → `targetFL`. `targetFL` is a 96-element
+// array of face-index ints (0..5) — typically `result.postSolveFL` from the vendor's
+// genFaceletWithStatus. Returns the rotation sequence string ('' for identity), or
+// null if no rotation matches (which means targetFL isn't a valid cube rotation of solved).
+function findCubeRotation(targetFL) {
+  let fp = '';
+  for (let i = 0; i < 96; i++) fp += String.fromCharCode(targetFL[i]);
+  for (const r of ROTATION_CATALOG) {
+    if (r.fingerprint === fp) return r.seq;
+  }
+  return null;
+}
+
+function inverseRotationSeq(seq) {
+  if (!seq) return '';
+  const tokens = seq.trim().split(/\s+/).filter(Boolean);
+  return tokens.reverse().map((m) => {
+    if (m.endsWith("'")) return m.slice(0, -1);
+    if (m.endsWith('2')) return m;
+    return m + "'";
+  }).join(' ');
+}
+
+// Try cs0x7f's TPR solver. Returns parsed moves on success, null on failure.
 function trySolveWithTPR(cube) {
   try {
     ensureCs0x7fInit();
     const facelet = cubeToFacelet96(cube);
-    const scrambleStr = scramble_444.genFacelet(facelet).trim();
-    if (!scrambleStr) return []; // already solved
-    const solutionStr = invertSolution(scrambleStr);
-    const moves = parseMoves(solutionStr);
+    const result = scramble_444.genFaceletWithStatus(facelet);
 
-    // Verify: applying these moves to the input must yield a solved cube.
-    const verify = cloneCube(cube);
-    for (const m of moves) {
-      applyMove(verify, m.face, m.dir, 0);
-      if (m.wide) applyMove(verify, m.face, m.dir, 1);
+    // Edge case: input is already solved.
+    if (!result.moveBuffer || result.moveBuffer.length === 0) {
+      return isSolved(cube) ? [] : null;
     }
-    return isSolved(verify) ? moves : null;
+
+    // The raw moveBuffer is the sequence cs0x7f applied to take INPUT → postSolveFL.
+    // postSolveFL is "solved up to a cube rotation R" (centers may be on wrong faces).
+    // The actual solution is moveBuffer + R⁻¹.
+    const moveBufferStr = result.moveBuffer.join(' ');
+    const moveBufferMoves = parseMoves(moveBufferStr);
+
+    // Fast path: if cs0x7f's solver perfectly solved the cube (no residual rotation),
+    // the moveBuffer alone is the solution.
+    if (result.solcubeOk) {
+      // Verify just to be safe.
+      const v = cloneCube(cube);
+      applyMoves(v, moveBufferMoves);
+      if (isSolved(v)) return moveBufferMoves;
+    }
+
+    // Slow path: detect the residual rotation R from postSolveFL and append R⁻¹ to
+    // the moveBuffer. R⁻¹ is a cube rotation, expressed in our move alphabet via
+    // wide-move pairs (e.g. y = "Uw Dw'") so applyMove can execute it directly.
+    if (result.postSolveFL) {
+      const rotSeq = findCubeRotation(result.postSolveFL);
+      if (rotSeq !== null) {
+        const invRot = inverseRotationSeq(rotSeq);
+        const invRotMoves = expandRotationsToMoves(invRot);
+        const moves = [...moveBufferMoves, ...invRotMoves];
+        const v = cloneCube(cube);
+        applyMoves(v, moves);
+        if (isSolved(v)) return moves;
+      }
+    }
+
+    return null;
   } catch {
     return null;
   }

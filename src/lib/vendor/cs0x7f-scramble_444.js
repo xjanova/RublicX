@@ -8,7 +8,7 @@
 "use strict";
 
 import mathlib from './cs0x7f-mathlib.js';
-import Cube from 'cubejs';
+import min2phase from './cs0x7f-min2phase.js';
 
 // Same DEBUG shim as in mathlib — keep verbose logs off by default.
 const DEBUG = (typeof globalThis !== 'undefined' && globalThis.DEBUG) || false;
@@ -21,19 +21,28 @@ const scrMgr = { reg: function reg() { return reg; } };
 // generation paths we don't use. Stub with no-op.
 const image = { llImage: { drawImage: () => {} } };
 
-// cstimer expects a 3×3 solver named `scramble_333` with a `solvFacelet(faceletString)`
-// method. We wrap cubejs's Kociemba — the simpler integration since cubejs is already
-// loaded for our 3×3-only path. Note: regardless of which 3×3 solver we use here, the
-// scramble_444 pipeline only delivers ~30-50% verified solutions on arbitrary 4×4
-// random-state inputs in this integration (the cubing community uses cs0x7f's full
-// cstimer module which has additional state setup we'd need to replicate fully).
-let _kociembaInited = false;
+// cstimer's scramble_444 expects a 3×3 solver named `scramble_333` with a
+// `solvFacelet(faceletString)` method that returns moves taking the input STATE
+// → SOLVED (i.e., a solution, not a scramble).
+//
+// We wrap cs0x7f's own min2phase (Kociemba two-phase) — this is the SAME solver
+// the original cstimer scramble_444 was tested against, so output format matches
+// exactly. cubejs (which we previously used) returns identity sequences for solved
+// cubes (~14 moves) which would corrupt cs0x7f's internal `solcube` state when fed
+// through `$move_6` after the 3-phase reduction; min2phase returns "" for solved,
+// preserving correctness.
+let _min2phaseInited = false;
+function ensureMin2PhaseInit() {
+	if (_min2phaseInited) return;
+	min2phase.initFull();
+	_min2phaseInited = true;
+}
 const scramble_333 = {
 	solvFacelet: function solvFacelet(facelet) {
-		if (!_kociembaInited) { Cube.initSolver(); _kociembaInited = true; }
-		const c = Cube.fromString(facelet);
-		if (c.isSolved()) return '';
-		return c.solve();
+		ensureMin2PhaseInit();
+		const sol = min2phase.solve(facelet);
+		// min2phase emits moves separated by double spaces; normalize to single.
+		return sol.replace(/\s+/g, ' ').trim();
 	},
 };
 
@@ -1969,7 +1978,10 @@ const scramble_444 = (function(Cnk, circle) {
 		}
 		var f3 = to333Facelet(solcube);
 		if (!f3) {
-			console.log('[scramble 444] Reduction Error!', toFacelet(solcube));
+			DEBUG && console.log('[scramble 444] Reduction Error!', toFacelet(solcube));
+			obj.solcubeSolved = false;
+			obj.solution = '';
+			return [obj.length1, obj.length2, obj.length3, 0, tt1, tt2, 0];
 		}
 		for (var i = 0; i < 54; i++) {
 			f3[i] = "URFDLB"[f3[i]];
@@ -1984,8 +1996,11 @@ const scramble_444 = (function(Cnk, circle) {
 			}
 		}
 		obj.solution = getMoveString(solcube);
-		// Verify: at this point solcube SHOULD be solved (input + reduction + 3×3 solve).
-		// If it isn't, the solution we'll output is wrong. Stash a flag for the caller.
+		// Verify: at this point solcube SHOULD be solved. cs0x7f's getMoveString does NOT
+		// always produce a correct scramble — it can leave a residual cube rotation when
+		// inputs have permuted centers. The wrapper around genFacelet (cube4x4.js) detects
+		// this and corrects by appending the right cube rotation. Stash the post-solve
+		// state and the raw moveBuffer so the wrapper can do its job.
 		var solcubeFL = toFacelet(solcube);
 		var solcubeOk = true;
 		for (var fi = 0; fi < 6; fi++) {
@@ -1995,6 +2010,15 @@ const scramble_444 = (function(Cnk, circle) {
 			if (!solcubeOk) break;
 		}
 		obj.solcubeSolved = solcubeOk;
+		obj._postSolveFL = solcubeFL;
+		// Raw moveBuffer (the actual moves applied to solcube during search) — decoded
+		// to readable SiGN-notation strings. The wrapper uses this when getMoveString's
+		// output is wrong.
+		var moveBuf = [];
+		for (var mi = 0; mi < solcube.moveLength; mi++) {
+			moveBuf.push(move2str_1[solcube.moveBuffer[mi]].replace(/\s/g, ''));
+		}
+		obj._moveBuffer = moveBuf;
 		DEBUG && console.log('[scramble 444] 3x3x3 Done in', Date.now() - tt, 'solcubeOk=', solcubeOk);
 		DEBUG && console.log('[scramble 444] Phase depths: ', [obj.length1, obj.length2, obj.length3, length333, tt1, tt2, tt3]);
 		return [obj.length1, obj.length2, obj.length3, length333, tt1, tt2, tt3];
@@ -2481,6 +2505,29 @@ const scramble_444 = (function(Cnk, circle) {
 		}
 		$doSearch(searcher);
 		return searcher.solution.replace(/\s+/g, ' ');
+	}
+
+	// Variant of genFacelet that returns { solution, solcubeOk } so the caller can
+	// detect when cs0x7f's internal solve verification failed and fall back.
+	function genFaceletWithStatus(facelet) {
+		init();
+		facelet = facelet.split('');
+		for (var i = 0; i < 96; i++) {
+			facelet[i] = "URFDLB".indexOf(facelet[i]);
+		}
+		searcher.c = new FullCube_3;
+		var chk = $fromFacelet(searcher.c, facelet);
+		if (chk != 0) {
+			return { solution: '', solcubeOk: false, chk: chk };
+		}
+		$doSearch(searcher);
+		return {
+			solution: searcher.solution.replace(/\s+/g, ' '),
+			solcubeOk: !!searcher.solcubeSolved,
+			chk: 0,
+			postSolveFL: searcher._postSolveFL,
+			moveBuffer: searcher._moveBuffer,
+		};
 	}
 
 	function testbench(nsolv) {
@@ -3165,6 +3212,9 @@ const scramble_444 = (function(Cnk, circle) {
 		// Added export: solve a 4×4 from its 96-character facelet string ("URFDLB" letters).
 		// Returns the move-string solution (whitespace-separated SiGN notation).
 		genFacelet: genFacelet,
+		// Same as genFacelet but also returns { solcubeOk } so callers can detect
+		// when cs0x7f's internal verify failed (the produced sequence is wrong).
+		genFaceletWithStatus: genFaceletWithStatus,
 		init: init,
 		applyScrambleToFacelet: applyScrambleToFacelet,
 	}
